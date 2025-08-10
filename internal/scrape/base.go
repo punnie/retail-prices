@@ -11,18 +11,19 @@ import (
 	"strings"
 	"time"
 
+	"price-scraper/internal/storage"
+
 	"github.com/PuerkitoBio/goquery"
 	"golang.org/x/time/rate"
-	"price-scraper/internal/storage"
 )
 
 // BaseScraper provides common functionality for all scrapers
 type BaseScraper struct {
-	name       string
-	baseURL    string
-	userAgent  string
-	client     *http.Client
-	delay      time.Duration
+	name      string
+	baseURL   string
+	userAgent string
+	client    *http.Client
+	delay     time.Duration
 }
 
 // NewBaseScraper creates a new base scraper
@@ -33,7 +34,7 @@ func NewBaseScraper(name, baseURL, userAgent string) *BaseScraper {
 		Jar:     jar,
 		Timeout: 30 * time.Second,
 	}
-	
+
 	return &BaseScraper{
 		name:      name,
 		baseURL:   baseURL,
@@ -100,26 +101,26 @@ func (b *BaseScraper) ParsePrice(priceStr string) (float64, error) {
 	priceStr = strings.ReplaceAll(priceStr, "€", "")
 	priceStr = strings.ReplaceAll(priceStr, "EUR", "")
 	priceStr = strings.ReplaceAll(priceStr, " ", "")
-	
+
 	// Handle Portuguese decimal format (comma as decimal separator)
 	priceStr = strings.ReplaceAll(priceStr, ",", ".")
-	
+
 	// Extract numbers using regex
 	re := regexp.MustCompile(`\d+\.?\d*`)
 	matches := re.FindAllString(priceStr, -1)
-	
+
 	if len(matches) == 0 {
 		return 0, fmt.Errorf("no price found in string: %s", priceStr)
 	}
-	
+
 	// Take the last match (usually the actual price)
 	priceStr = matches[len(matches)-1]
-	
+
 	price, err := strconv.ParseFloat(priceStr, 64)
 	if err != nil {
 		return 0, fmt.Errorf("failed to parse price '%s': %w", priceStr, err)
 	}
-	
+
 	return price, nil
 }
 
@@ -255,6 +256,8 @@ func (b *BaseScraper) FetchPageWithRateLimit(ctx context.Context, url string, li
 	req.Header.Set("Accept-Language", "pt-PT,pt;q=0.9,en;q=0.8")
 	req.Header.Set("Connection", "keep-alive")
 	req.Header.Set("Upgrade-Insecure-Requests", "1")
+
+	fmt.Printf("Fetching product at %s\n", url)
 
 	resp, err := b.client.Do(req)
 	if err != nil {

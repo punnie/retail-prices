@@ -6,9 +6,10 @@ import (
 	"net/http"
 	"sync"
 
-	"golang.org/x/time/rate"
 	"price-scraper/internal/config"
 	"price-scraper/internal/storage"
+
+	"golang.org/x/time/rate"
 )
 
 // ProductCallback is a function type for handling products as they are scraped
@@ -18,15 +19,15 @@ type ProductCallback func(*storage.Product) error
 type Scraper interface {
 	// GetName returns the name of the store
 	GetName() string
-	
+
 	// ScrapeProducts scrapes products from the store using seed URLs/sitemaps
 	// Deprecated: Use ScrapeProductsWithCallback for streaming storage
 	ScrapeProducts() ([]*storage.Product, error)
-	
+
 	// ScrapeProductsWithCallback scrapes products from the store and calls the callback for each product
 	// This allows for streaming storage and reduces memory usage
 	ScrapeProductsWithCallback(callback ProductCallback) error
-	
+
 	// SetHTTPClient allows setting a custom HTTP client
 	SetHTTPClient(client *http.Client)
 }
@@ -73,7 +74,7 @@ func (m *Manager) ScrapeStore(storeName string) error {
 	}
 
 	fmt.Printf("Starting to scrape %s...\n", scraper.GetName())
-	
+
 	products, err := scraper.ScrapeProducts()
 	if err != nil {
 		return fmt.Errorf("failed to scrape %s: %w", scraper.GetName(), err)
@@ -99,7 +100,7 @@ func (m *Manager) ScrapeStoreStreaming(storeName string) error {
 	}
 
 	fmt.Printf("Starting to scrape %s (streaming mode)...\n", scraper.GetName())
-	
+
 	productCount := 0
 	callback := func(product *storage.Product) error {
 		if err := m.storage.SaveProduct(product); err != nil {
@@ -163,9 +164,9 @@ func (m *Manager) ScrapeStoreParallel(storeName string) error {
 
 	// Check if scraper supports parallel scraping
 	if parallelScraper, ok := scraper.(ParallelScraper); ok {
-		fmt.Printf("Starting to scrape %s (parallel mode with %d workers)...\n", 
+		fmt.Printf("Starting to scrape %s (parallel mode with %d workers)...\n",
 			scraper.GetName(), m.config.MaxConcurrentWorkers)
-		
+
 		return parallelScraper.ScrapeProductsParallel(m.config, m.storage, m.limiter)
 	}
 
@@ -184,56 +185,71 @@ type ParallelScraper interface {
 type WorkerPool struct {
 	workers   int
 	jobs      chan func() error
-	results   chan error
 	wg        sync.WaitGroup
 	ctx       context.Context
 	cancel    context.CancelFunc
 	limiter   *rate.Limiter
+	errorChan chan error
+	errorWg   sync.WaitGroup
 }
 
 // NewWorkerPool creates a new worker pool
 func NewWorkerPool(workers int, limiter *rate.Limiter) *WorkerPool {
 	ctx, cancel := context.WithCancel(context.Background())
-	
+
 	return &WorkerPool{
-		workers: workers,
-		jobs:    make(chan func() error, workers*2), // Buffer for jobs
-		results: make(chan error, workers*2),
-		ctx:     ctx,
-		cancel:  cancel,
-		limiter: limiter,
+		workers:   workers,
+		jobs:      make(chan func() error, workers*10), // Larger buffer for jobs
+		ctx:       ctx,
+		cancel:    cancel,
+		limiter:   limiter,
+		errorChan: make(chan error, workers*10), // Buffer for errors
 	}
 }
 
 // Start starts the worker pool
 func (wp *WorkerPool) Start() {
+	// Start error handler goroutine
+	wp.errorWg.Add(1)
+	go func() {
+		defer wp.errorWg.Done()
+		for err := range wp.errorChan {
+			if err != nil {
+				// Just log the error, don't block
+				fmt.Printf("Worker error: %v\n", err)
+			}
+		}
+	}()
+
+	// Start workers
 	for i := 0; i < wp.workers; i++ {
 		wp.wg.Add(1)
-		go wp.worker()
+		go wp.worker(i)
 	}
 }
 
 // worker is the worker goroutine
-func (wp *WorkerPool) worker() {
+func (wp *WorkerPool) worker(id int) {
 	defer wp.wg.Done()
-	
+
 	for {
 		select {
 		case job, ok := <-wp.jobs:
 			if !ok {
 				return
 			}
-			
-			// Rate limit the request
-			if err := wp.limiter.Wait(wp.ctx); err != nil {
-				wp.results <- err
-				continue
+
+			// Execute the job (rate limiting is handled inside the job function)
+			if err := job(); err != nil {
+				// Send error to error channel in non-blocking way
+				select {
+				case wp.errorChan <- err:
+				default:
+					// If error channel is full, just log and continue
+					fmt.Printf("Worker %d: error channel full, dropping error: %v\n", id, err)
+				}
 			}
-			
-			// Execute the job
-			err := job()
-			wp.results <- err
-			
+
 		case <-wp.ctx.Done():
 			return
 		}
@@ -253,10 +269,6 @@ func (wp *WorkerPool) Close() {
 	close(wp.jobs)
 	wp.wg.Wait()
 	wp.cancel()
-	close(wp.results)
-}
-
-// Results returns the results channel
-func (wp *WorkerPool) Results() <-chan error {
-	return wp.results
+	close(wp.errorChan)
+	wp.errorWg.Wait()
 }
