@@ -1,9 +1,11 @@
 package scraper
 
 import (
+	"encoding/json"
 	"fmt"
-	"net/url"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/PuerkitoBio/goquery"
 	"price-scraper/internal/storage"
@@ -19,271 +21,221 @@ func NewPingoDoceScraper() *PingoDoceScraper {
 	userAgent := "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 	base := NewBaseScraper("Pingo Doce", "https://www.pingodoce.pt", userAgent)
 	
+	// Set a longer delay to be more respectful to the server
+	base.SetDelay(2 * time.Second)
+	
 	return &PingoDoceScraper{
 		BaseScraper: base,
 	}
 }
 
-// ScrapeProducts scrapes products from Pingo Doce
+// GTMInfo represents the GTM tracking data that contains product information
+type GTMInfo struct {
+	Currency string `json:"currency"`
+	Value    float64 `json:"value"`
+	Items    []struct {
+		ItemID       string  `json:"item_id"`
+		ItemName     string  `json:"item_name"`
+		ItemBrand    string  `json:"item_brand"`
+		ItemCategory string  `json:"item_category"`
+		Price        float64 `json:"price"`
+	} `json:"items"`
+}
+
+// ScrapeProducts scrapes products from Pingo Doce using the API endpoint
 func (p *PingoDoceScraper) ScrapeProducts(searchTerm string) ([]*storage.Product, error) {
-	var products []*storage.Product
+	var allProducts []*storage.Product
 	
-	if searchTerm == "" {
-		// If no search term, scrape some popular categories
-		categories := []string{
-			"frescos",
-			"mercearia",
-			"congelados",
-			"bebidas",
-			"casa-e-jardim",
-		}
+	// Use the API endpoint to get all products with pagination
+	start := 0
+	pageSize := 20
+	
+	fmt.Printf("Starting to scrape Pingo Doce products using API endpoint\n")
+	
+	for {
+		apiURL := fmt.Sprintf("https://www.pingodoce.pt/on/demandware.store/Sites-pingo-doce-Site/default/Search-UpdateGrid?start=%d&sz=%d", start, pageSize)
 		
-		for _, category := range categories {
-			categoryProducts, err := p.scrapeCategory(category)
-			if err != nil {
-				fmt.Printf("Warning: failed to scrape Pingo Doce category %s: %v\n", category, err)
-				continue
-			}
-			products = append(products, categoryProducts...)
-		}
-	} else {
-		// Search for specific products
-		searchProducts, err := p.searchProducts(searchTerm)
+		fmt.Printf("Fetching page: start=%d, size=%d\n", start, pageSize)
+		
+		doc, err := p.FetchPage(apiURL)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("failed to fetch API page: %w", err)
 		}
-		products = append(products, searchProducts...)
-	}
-	
-	return products, nil
-}
-
-// searchProducts searches for products using the search functionality
-func (p *PingoDoceScraper) searchProducts(searchTerm string) ([]*storage.Product, error) {
-	// Encode the search term for URL
-	encodedTerm := url.QueryEscape(searchTerm)
-	searchURL := fmt.Sprintf("%s/pesquisar?q=%s", p.baseURL, encodedTerm)
-	
-	fmt.Printf("Searching Pingo Doce for: %s\n", searchTerm)
-	
-	doc, err := p.FetchPage(searchURL)
-	if err != nil {
-		return nil, fmt.Errorf("failed to fetch search page: %w", err)
-	}
-	
-	return p.extractProductsFromPage(doc, searchURL)
-}
-
-// scrapeCategory scrapes products from a specific category
-func (p *PingoDoceScraper) scrapeCategory(category string) ([]*storage.Product, error) {
-	categoryURL := fmt.Sprintf("%s/%s", p.baseURL, category)
-	
-	fmt.Printf("Scraping Pingo Doce category: %s\n", category)
-	
-	doc, err := p.FetchPage(categoryURL)
-	if err != nil {
-		return nil, fmt.Errorf("failed to fetch category page: %w", err)
-	}
-	
-	return p.extractProductsFromPage(doc, categoryURL)
-}
-
-// extractProductsFromPage extracts products from a page document
-func (p *PingoDoceScraper) extractProductsFromPage(doc *goquery.Document, pageURL string) ([]*storage.Product, error) {
-	var products []*storage.Product
-	
-	// Common selectors for Pingo Doce product listings
-	productSelectors := []string{
-		".product-item",
-		".product-card",
-		".product",
-		"[data-testid*='product']",
-		".pd-product-tile",
-		".item-product",
-	}
-	
-	var foundProducts bool
-	
-	for _, selector := range productSelectors {
-		doc.Find(selector).Each(func(i int, s *goquery.Selection) {
-			foundProducts = true
-			product := p.extractProductFromElement(s, pageURL)
-			if product != nil {
-				products = append(products, product)
-			}
-		})
 		
-		if foundProducts {
+		products := p.ExtractProductsFromAPIResponse(doc)
+		
+		if len(products) == 0 {
+			fmt.Printf("No products found on this page, stopping pagination\n")
 			break
 		}
+		
+		allProducts = append(allProducts, products...)
+		
+		fmt.Printf("Extracted %d products from this page (total: %d)\n", len(products), len(allProducts))
+		
+		// If we got less than the page size, we've reached the end
+		if len(products) < pageSize {
+			fmt.Printf("Reached end of pagination (got %d < %d products)\n", len(products), pageSize)
+			break
+		}
+		
+		start += pageSize
 	}
 	
-	if !foundProducts {
-		// Fallback: try to find any element that might contain product information
-		doc.Find("*").Each(func(i int, s *goquery.Selection) {
-			text := s.Text()
-			if strings.Contains(text, "€") && len(strings.TrimSpace(text)) < 200 {
-				product := p.extractProductFromElement(s, pageURL)
-				if product != nil {
-					products = append(products, product)
-				}
+	fmt.Printf("Finished scraping Pingo Doce: %d total products\n", len(allProducts))
+	
+	// Filter by search term if provided
+	if searchTerm != "" {
+		filteredProducts := make([]*storage.Product, 0)
+		searchLower := strings.ToLower(searchTerm)
+		
+		for _, product := range allProducts {
+			if strings.Contains(strings.ToLower(product.Name), searchLower) ||
+			   strings.Contains(strings.ToLower(product.Brand), searchLower) ||
+			   strings.Contains(strings.ToLower(product.Description), searchLower) {
+				filteredProducts = append(filteredProducts, product)
 			}
-		})
+		}
+		
+		fmt.Printf("Filtered to %d products matching '%s'\n", len(filteredProducts), searchTerm)
+		return filteredProducts, nil
 	}
 	
-	return products, nil
+	return allProducts, nil
 }
 
-// extractProductFromElement extracts product information from a DOM element
-func (p *PingoDoceScraper) extractProductFromElement(s *goquery.Selection, baseURL string) *storage.Product {
-	// Try to find product name
-	name := p.findProductName(s)
+// ExtractProductsFromAPIResponse extracts products from the API response HTML
+func (p *PingoDoceScraper) ExtractProductsFromAPIResponse(doc *goquery.Document) []*storage.Product {
+	var products []*storage.Product
+	
+	// Find all product containers
+	doc.Find(".product[data-pid]").Each(func(i int, s *goquery.Selection) {
+		product := p.extractProductFromElement(s)
+		if product != nil {
+			products = append(products, product)
+		}
+	})
+	
+	return products
+}
+
+// extractProductFromElement extracts product information from a product element
+func (p *PingoDoceScraper) extractProductFromElement(s *goquery.Selection) *storage.Product {
+	// Check if this is a valid product element
+	if _, exists := s.Attr("data-pid"); !exists {
+		return nil
+	}
+	
+	// Extract name from the product name link
+	name := p.CleanText(s.Find(".product-name-link a").Text())
+	if name == "" {
+		// Fallback to image alt text
+		name = p.CleanText(s.Find(".product-tile-component-image").AttrOr("alt", ""))
+	}
 	if name == "" {
 		return nil
 	}
 	
-	// Try to find price
-	priceStr := p.findProductPrice(s)
-	if priceStr == "" {
-		return nil
+	// Extract price from the value content attribute or sales text
+	var priceValue float64
+	var err error
+	
+	// Try to get price from content attribute first
+	if priceContent := s.Find(".value").AttrOr("content", ""); priceContent != "" {
+		priceValue, err = strconv.ParseFloat(priceContent, 64)
+		if err != nil {
+			return nil
+		}
+	} else {
+		// Fallback to parsing from sales text
+		priceText := s.Find(".sales").Text()
+		priceValue, err = p.ParsePrice(priceText)
+		if err != nil {
+			return nil
+		}
 	}
 	
-	// Try to find product URL
-	productURL := p.findProductURL(s, baseURL)
+	// Extract brand
+	brand := p.CleanText(s.Find(".product-brand-name").Text())
 	
-	// Try to find image URL
-	imageURL := p.findProductImage(s)
+	// Extract unit information
+	unit := p.CleanText(s.Find(".product-unit").Text())
 	
-	// Try to find brand
-	brand := p.findProductBrand(s)
-	
-	// Create product
-	product, err := p.CreateProduct(name, priceStr, productURL)
-	if err != nil {
-		return nil
+	// Extract image URL
+	imageURL := s.Find(".product-tile-component-image").AttrOr("src", "")
+	if imageURL != "" && !strings.HasPrefix(imageURL, "http") {
+		imageURL = p.baseURL + imageURL
 	}
 	
-	// Add additional fields
-	if imageURL != "" {
-		product.ImageURL = imageURL
+	// Extract product URL
+	productURL := s.Find(".product-name-link a").AttrOr("href", "")
+	if productURL != "" && !strings.HasPrefix(productURL, "http") {
+		productURL = p.baseURL + productURL
 	}
-	if brand != "" {
-		product.Brand = brand
+	
+	// Extract additional information from GTM data
+	var category string
+	if gtmData, exists := s.Find(".product-tile-pd").Attr("data-gtm-info"); exists {
+		if gtmInfo := p.parseGTMInfo(gtmData); gtmInfo != nil && len(gtmInfo.Items) > 0 {
+			category = gtmInfo.Items[0].ItemCategory
+			// Verify the price matches
+			if gtmInfo.Items[0].Price > 0 {
+				priceValue = gtmInfo.Items[0].Price
+			}
+			// Verify the brand matches
+			if gtmInfo.Items[0].ItemBrand != "" && brand == "" {
+				brand = gtmInfo.Items[0].ItemBrand
+			}
+		}
+	}
+	
+	// Create the product
+	product := &storage.Product{
+		Store:       p.name,
+		Name:        name,
+		Price:       priceValue,
+		Currency:    "EUR",
+		URL:         productURL,
+		ImageURL:    imageURL,
+		Brand:       brand,
+		Category:    category,
+		Description: p.buildDescription(unit, category),
+		ScrapedAt:   p.getCurrentTime(),
 	}
 	
 	return product
 }
 
-// findProductName tries to find the product name in various ways
-func (p *PingoDoceScraper) findProductName(s *goquery.Selection) string {
-	nameSelectors := []string{
-		".product-name",
-		".product-title",
-		"h1", "h2", "h3", "h4",
-		"[data-testid*='name']",
-		"[data-testid*='title']",
-		".title",
-		".name",
-		".item-name",
+// parseGTMInfo parses the GTM tracking data JSON
+func (p *PingoDoceScraper) parseGTMInfo(gtmData string) *GTMInfo {
+	// Decode HTML entities
+	gtmData = strings.ReplaceAll(gtmData, "&quot;", "\"")
+	gtmData = strings.ReplaceAll(gtmData, "&amp;", "&")
+	
+	var gtmInfo GTMInfo
+	if err := json.Unmarshal([]byte(gtmData), &gtmInfo); err != nil {
+		return nil
 	}
 	
-	for _, selector := range nameSelectors {
-		if name := s.Find(selector).First().Text(); name != "" {
-			return p.CleanText(name)
-		}
-	}
-	
-	// Fallback: use alt text from images
-	if alt, exists := s.Find("img").Attr("alt"); exists && alt != "" {
-		return p.CleanText(alt)
-	}
-	
-	return ""
+	return &gtmInfo
 }
 
-// findProductPrice tries to find the product price
-func (p *PingoDoceScraper) findProductPrice(s *goquery.Selection) string {
-	priceSelectors := []string{
-		".price",
-		".product-price",
-		"[data-testid*='price']",
-		".value",
-		".amount",
-		".item-price",
+// buildDescription creates a description from available information
+func (p *PingoDoceScraper) buildDescription(unit, category string) string {
+	var parts []string
+	
+	if unit != "" {
+		parts = append(parts, unit)
 	}
 	
-	for _, selector := range priceSelectors {
-		if price := s.Find(selector).First().Text(); price != "" && strings.Contains(price, "€") {
-			return price
-		}
+	if category != "" {
+		parts = append(parts, "Categoria: "+category)
 	}
 	
-	// Fallback: look for any text containing €
-	text := s.Text()
-	if strings.Contains(text, "€") {
-		lines := strings.Split(text, "\n")
-		for _, line := range lines {
-			line = strings.TrimSpace(line)
-			if strings.Contains(line, "€") && len(line) < 50 {
-				return line
-			}
-		}
-	}
-	
-	return ""
+	return strings.Join(parts, " | ")
 }
 
-// findProductURL tries to find the product URL
-func (p *PingoDoceScraper) findProductURL(s *goquery.Selection, baseURL string) string {
-	// Look for links
-	if href, exists := s.Find("a").Attr("href"); exists {
-		if strings.HasPrefix(href, "http") {
-			return href
-		} else if strings.HasPrefix(href, "/") {
-			return p.baseURL + href
-		}
-	}
-	
-	// Check if the element itself is a link
-	if href, exists := s.Attr("href"); exists {
-		if strings.HasPrefix(href, "http") {
-			return href
-		} else if strings.HasPrefix(href, "/") {
-			return p.baseURL + href
-		}
-	}
-	
-	return baseURL
-}
-
-// findProductImage tries to find the product image URL
-func (p *PingoDoceScraper) findProductImage(s *goquery.Selection) string {
-	if src, exists := s.Find("img").Attr("src"); exists {
-		if strings.HasPrefix(src, "http") {
-			return src
-		} else if strings.HasPrefix(src, "/") {
-			return p.baseURL + src
-		}
-	}
-	
-	return ""
-}
-
-// findProductBrand tries to find the product brand
-func (p *PingoDoceScraper) findProductBrand(s *goquery.Selection) string {
-	brandSelectors := []string{
-		".brand",
-		".product-brand",
-		"[data-testid*='brand']",
-		".manufacturer",
-		".item-brand",
-	}
-	
-	for _, selector := range brandSelectors {
-		if brand := s.Find(selector).First().Text(); brand != "" {
-			return p.CleanText(brand)
-		}
-	}
-	
-	return ""
+// getCurrentTime returns the current time (helper for testing)
+func (p *PingoDoceScraper) getCurrentTime() time.Time {
+	return time.Now()
 }
