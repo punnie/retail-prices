@@ -1,8 +1,10 @@
 package scraper
 
 import (
+	"encoding/xml"
 	"fmt"
 	"net/http"
+	"net/http/cookiejar"
 	"regexp"
 	"strconv"
 	"strings"
@@ -23,10 +25,18 @@ type BaseScraper struct {
 
 // NewBaseScraper creates a new base scraper
 func NewBaseScraper(name, baseURL, userAgent string) *BaseScraper {
+	// Create HTTP client with cookie jar
+	jar, _ := cookiejar.New(nil)
+	client := &http.Client{
+		Jar:     jar,
+		Timeout: 30 * time.Second,
+	}
+	
 	return &BaseScraper{
 		name:      name,
 		baseURL:   baseURL,
 		userAgent: userAgent,
+		client:    client,
 		delay:     time.Second, // Default 1 second delay
 	}
 }
@@ -56,7 +66,7 @@ func (b *BaseScraper) FetchPage(url string) (*goquery.Document, error) {
 	req.Header.Set("User-Agent", b.userAgent)
 	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8")
 	req.Header.Set("Accept-Language", "pt-PT,pt;q=0.9,en;q=0.8")
-	req.Header.Set("Accept-Encoding", "gzip, deflate, br")
+	// Don't set Accept-Encoding to let Go's HTTP client handle compression automatically
 	req.Header.Set("Connection", "keep-alive")
 	req.Header.Set("Upgrade-Insecure-Requests", "1")
 
@@ -134,4 +144,90 @@ func (b *BaseScraper) CreateProduct(name, priceStr, url string) (*storage.Produc
 		URL:       url,
 		ScrapedAt: time.Now(),
 	}, nil
+}
+
+// SitemapIndex represents the structure of a sitemap index XML
+type SitemapIndex struct {
+	XMLName  xml.Name  `xml:"sitemapindex"`
+	Sitemaps []Sitemap `xml:"sitemap"`
+}
+
+// Sitemap represents a single sitemap entry in the index
+type Sitemap struct {
+	Loc     string `xml:"loc"`
+	LastMod string `xml:"lastmod"`
+}
+
+// URLSet represents the structure of a sitemap XML with URLs
+type URLSet struct {
+	XMLName xml.Name `xml:"urlset"`
+	URLs    []URL    `xml:"url"`
+}
+
+// URL represents a single URL entry in a sitemap
+type URL struct {
+	Loc        string `xml:"loc"`
+	LastMod    string `xml:"lastmod"`
+	ChangeFreq string `xml:"changefreq"`
+	Priority   string `xml:"priority"`
+}
+
+// FetchXML fetches an XML document from a URL and returns the response body
+func (b *BaseScraper) FetchXML(url string) ([]byte, error) {
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Set("User-Agent", b.userAgent)
+	req.Header.Set("Accept", "application/xml,text/xml,*/*")
+	req.Header.Set("Accept-Language", "pt-PT,pt;q=0.9,en;q=0.8")
+
+	resp, err := b.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("HTTP error: %d", resp.StatusCode)
+	}
+
+	// Read the response body
+	body := make([]byte, 0)
+	buf := make([]byte, 1024)
+	for {
+		n, err := resp.Body.Read(buf)
+		if n > 0 {
+			body = append(body, buf[:n]...)
+		}
+		if err != nil {
+			break
+		}
+	}
+
+	// Add delay to be respectful to the server
+	time.Sleep(b.delay)
+
+	return body, nil
+}
+
+// ParseSitemapIndex parses a sitemap index XML and returns the sitemap URLs
+func (b *BaseScraper) ParseSitemapIndex(xmlData []byte) (*SitemapIndex, error) {
+	var sitemapIndex SitemapIndex
+	err := xml.Unmarshal(xmlData, &sitemapIndex)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse sitemap index: %w", err)
+	}
+	return &sitemapIndex, nil
+}
+
+// ParseSitemap parses a sitemap XML and returns the URLs
+func (b *BaseScraper) ParseSitemap(xmlData []byte) (*URLSet, error) {
+	var urlSet URLSet
+	err := xml.Unmarshal(xmlData, &urlSet)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse sitemap: %w", err)
+	}
+	return &urlSet, nil
 }

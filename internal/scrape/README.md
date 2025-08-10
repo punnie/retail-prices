@@ -13,9 +13,9 @@ An extensible web scraper for Portuguese retail stores that collects product pri
 
 ## Supported Stores
 
-- **Continente** (`continente`)
-- **Pingo Doce** (`pingodoce`)
-- **Auchan** (`auchan`)
+- **Continente** (`continente`) - Uses sitemap-based scraping for comprehensive product discovery
+- **Pingo Doce** (`pingodoce`) - Traditional category and search-based scraping
+- **Auchan** (`auchan`) - Traditional category and search-based scraping
 
 ## Prerequisites
 
@@ -157,12 +157,3 @@ This tool is for educational and personal use only. Please ensure you comply wit
 ## License
 
 This project is provided as-is for educational purposes. Please use responsibly and in accordance with applicable laws and website terms of service.
-
-
-
-
-
-
-```
-https://www.pingodoce.pt/on/demandware.store/Sites-pingo-doce-Site/default/Search-UpdateGrid?pmin=0&start=1&sz=500
-```
