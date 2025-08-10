@@ -1,11 +1,16 @@
 package scraper
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
+	"sync/atomic"
 
 	"github.com/PuerkitoBio/goquery"
+	"golang.org/x/time/rate"
+	"price-scraper/internal/config"
 	"price-scraper/internal/storage"
 )
 
@@ -46,6 +51,22 @@ func (a *AuchanScraper) ScrapeProducts() ([]*storage.Product, error) {
 
 // ScrapeProductsWithCallback scrapes products from Auchan using sitemap-based approach with streaming storage
 func (a *AuchanScraper) ScrapeProductsWithCallback(callback ProductCallback) error {
+	return a.ScrapeProductsWithCallbackAndConfig(callback, nil)
+}
+
+// ScrapeProductsWithCallbackAndConfig scrapes products with configuration support
+func (a *AuchanScraper) ScrapeProductsWithCallbackAndConfig(callback ProductCallback, cfg *config.Config) error {
+	// Use default limits if no config provided
+	maxSitemaps := -1
+	maxProductsTotal := 100 // Default limit for streaming mode
+	maxProductsPerSitemap := 20
+	
+	if cfg != nil {
+		maxSitemaps = cfg.MaxSitemaps
+		maxProductsTotal = cfg.MaxProductsTotal
+		maxProductsPerSitemap = cfg.MaxProductsPerSitemap
+	}
+	
 	// Use sitemap-based approach for comprehensive scraping
 	fmt.Printf("Fetching Auchan sitemap index from: %s\n", a.sitemapIndexURL)
 	
@@ -64,12 +85,18 @@ func (a *AuchanScraper) ScrapeProductsWithCallback(callback ProductCallback) err
 	productSitemaps := a.filterProductSitemaps(sitemapIndex.Sitemaps)
 	fmt.Printf("Found %d product sitemaps\n", len(productSitemaps))
 	
+	// Apply sitemap limit
+	if maxSitemaps > 0 && len(productSitemaps) > maxSitemaps {
+		productSitemaps = productSitemaps[:maxSitemaps]
+		fmt.Printf("Limited to %d sitemaps as per configuration\n", maxSitemaps)
+	}
+	
 	// Process each product sitemap
 	productCount := 0
 	for i, sitemap := range productSitemaps {
 		fmt.Printf("Processing sitemap %d/%d: %s\n", i+1, len(productSitemaps), sitemap.Loc)
 		
-		sitemapProductCount, err := a.processSitemapWithCallback(sitemap.Loc, callback)
+		sitemapProductCount, err := a.processSitemapWithCallbackAndConfig(sitemap.Loc, callback, maxProductsPerSitemap)
 		if err != nil {
 			fmt.Printf("Warning: failed to process sitemap %s: %v\n", sitemap.Loc, err)
 			continue
@@ -77,9 +104,9 @@ func (a *AuchanScraper) ScrapeProductsWithCallback(callback ProductCallback) err
 		
 		productCount += sitemapProductCount
 		
-		// Limit the number of products to avoid overwhelming the system
-		if productCount >= 100 {
-			fmt.Printf("Reached product limit of 100, stopping\n")
+		// Check total product limit
+		if maxProductsTotal > 0 && productCount >= maxProductsTotal {
+			fmt.Printf("Reached total product limit of %d, stopping\n", maxProductsTotal)
 			break
 		}
 	}
@@ -580,4 +607,203 @@ func (a *AuchanScraper) extractBrandFromJSONLD(doc *goquery.Document) string {
 	})
 	
 	return foundBrand
+}
+
+// processSitemapWithCallbackAndConfig processes a single product sitemap with configuration limits
+func (a *AuchanScraper) processSitemapWithCallbackAndConfig(sitemapURL string, callback ProductCallback, maxProductsPerSitemap int) (int, error) {
+	// Fetch sitemap XML
+	xmlData, err := a.FetchXML(sitemapURL)
+	if err != nil {
+		return 0, fmt.Errorf("failed to fetch sitemap: %w", err)
+	}
+	
+	// Parse sitemap
+	urlSet, err := a.ParseSitemap(xmlData)
+	if err != nil {
+		return 0, fmt.Errorf("failed to parse sitemap: %w", err)
+	}
+	
+	fmt.Printf("Found %d product URLs in sitemap\n", len(urlSet.URLs))
+	
+	// Apply per-sitemap limit
+	maxProducts := len(urlSet.URLs)
+	if maxProductsPerSitemap > 0 && maxProducts > maxProductsPerSitemap {
+		maxProducts = maxProductsPerSitemap
+	}
+	
+	productCount := 0
+	for i := 0; i < maxProducts; i++ {
+		urlEntry := urlSet.URLs[i]
+		
+		product, err := a.scrapeProductPage(urlEntry.Loc)
+		if err != nil {
+			fmt.Printf("Warning: failed to scrape product %s: %v\n", urlEntry.Loc, err)
+			continue
+		}
+		
+		if product != nil {
+			if err := callback(product); err != nil {
+				return productCount, fmt.Errorf("callback failed for product %s: %w", product.Name, err)
+			}
+			productCount++
+		}
+	}
+	
+	return productCount, nil
+}
+
+// ScrapeProductsParallel implements parallel scraping for Auchan
+func (a *AuchanScraper) ScrapeProductsParallel(cfg *config.Config, storage storage.Storage, limiter *rate.Limiter) error {
+	ctx := context.Background()
+	
+	fmt.Printf("Fetching Auchan sitemap index from: %s\n", a.sitemapIndexURL)
+	
+	// Fetch and parse sitemap index
+	xmlData, err := a.FetchXMLWithRateLimit(ctx, a.sitemapIndexURL, limiter)
+	if err != nil {
+		return fmt.Errorf("failed to fetch sitemap index: %w", err)
+	}
+	
+	sitemapIndex, err := a.ParseSitemapIndex(xmlData)
+	if err != nil {
+		return fmt.Errorf("failed to parse sitemap index: %w", err)
+	}
+	
+	// Filter product sitemaps
+	productSitemaps := a.filterProductSitemaps(sitemapIndex.Sitemaps)
+	fmt.Printf("Found %d product sitemaps\n", len(productSitemaps))
+	
+	// Apply sitemap limit
+	if cfg.MaxSitemaps > 0 && len(productSitemaps) > cfg.MaxSitemaps {
+		productSitemaps = productSitemaps[:cfg.MaxSitemaps]
+		fmt.Printf("Limited to %d sitemaps as per configuration\n", cfg.MaxSitemaps)
+	}
+	
+	// Create worker pool
+	workerPool := NewWorkerPool(cfg.MaxConcurrentWorkers, limiter)
+	workerPool.Start()
+	defer workerPool.Close()
+	
+	// Counters for tracking progress
+	var totalProducts int64
+	var processedSitemaps int64
+	var mu sync.Mutex
+	
+	// Process sitemaps in parallel
+	var wg sync.WaitGroup
+	for i, sitemap := range productSitemaps {
+		if cfg.MaxProductsTotal > 0 && atomic.LoadInt64(&totalProducts) >= int64(cfg.MaxProductsTotal) {
+			fmt.Printf("Reached total product limit of %d, stopping\n", cfg.MaxProductsTotal)
+			break
+		}
+		
+		wg.Add(1)
+		go func(sitemapIndex int, sitemapURL string) {
+			defer wg.Done()
+			
+			fmt.Printf("Processing sitemap %d/%d: %s\n", sitemapIndex+1, len(productSitemaps), sitemapURL)
+			
+			count, err := a.processSitemapParallel(ctx, sitemapURL, cfg, storage, workerPool, &totalProducts)
+			if err != nil {
+				fmt.Printf("Warning: failed to process sitemap %s: %v\n", sitemapURL, err)
+				return
+			}
+			
+			mu.Lock()
+			processedSitemaps++
+			fmt.Printf("Completed sitemap %d/%d, scraped %d products (total: %d)\n", 
+				int(processedSitemaps), len(productSitemaps), count, atomic.LoadInt64(&totalProducts))
+			mu.Unlock()
+		}(i, sitemap.Loc)
+	}
+	
+	wg.Wait()
+	
+	fmt.Printf("Parallel scraping completed. Total products scraped: %d\n", atomic.LoadInt64(&totalProducts))
+	return nil
+}
+
+// processSitemapParallel processes a single sitemap using parallel workers
+func (a *AuchanScraper) processSitemapParallel(ctx context.Context, sitemapURL string, cfg *config.Config, storage storage.Storage, workerPool *WorkerPool, totalProducts *int64) (int, error) {
+	// Fetch sitemap XML with rate limiting
+	xmlData, err := a.FetchXMLWithRateLimit(ctx, sitemapURL, workerPool.limiter)
+	if err != nil {
+		return 0, fmt.Errorf("failed to fetch sitemap: %w", err)
+	}
+	
+	// Parse sitemap
+	urlSet, err := a.ParseSitemap(xmlData)
+	if err != nil {
+		return 0, fmt.Errorf("failed to parse sitemap: %w", err)
+	}
+	
+	// Apply per-sitemap limit
+	maxProducts := len(urlSet.URLs)
+	if cfg.MaxProductsPerSitemap > 0 && maxProducts > cfg.MaxProductsPerSitemap {
+		maxProducts = cfg.MaxProductsPerSitemap
+	}
+	
+	fmt.Printf("Processing %d product URLs from sitemap (limited from %d)\n", maxProducts, len(urlSet.URLs))
+	
+	var productCount int64
+	var wg sync.WaitGroup
+	
+	// Process product URLs in parallel
+	for i := 0; i < maxProducts; i++ {
+		// Check global product limit
+		if cfg.MaxProductsTotal > 0 && atomic.LoadInt64(totalProducts) >= int64(cfg.MaxProductsTotal) {
+			break
+		}
+		
+		urlEntry := urlSet.URLs[i]
+		wg.Add(1)
+		
+		// Submit job to worker pool
+		workerPool.Submit(func() error {
+			defer wg.Done()
+			
+			// Check limits again inside worker
+			if cfg.MaxProductsTotal > 0 && atomic.LoadInt64(totalProducts) >= int64(cfg.MaxProductsTotal) {
+				return nil
+			}
+			
+			product, err := a.scrapeProductPageWithRateLimit(ctx, urlEntry.Loc, workerPool.limiter)
+			if err != nil {
+				fmt.Printf("Warning: failed to scrape product %s: %v\n", urlEntry.Loc, err)
+				return nil
+			}
+			
+			if product != nil {
+				if err := storage.SaveProduct(product); err != nil {
+					fmt.Printf("Warning: failed to save product %s: %v\n", product.Name, err)
+					return nil
+				}
+				
+				atomic.AddInt64(&productCount, 1)
+				atomic.AddInt64(totalProducts, 1)
+				
+				// Progress reporting
+				if count := atomic.LoadInt64(&productCount); count%10 == 0 {
+					fmt.Printf("Scraped %d products from current sitemap...\n", count)
+				}
+			}
+			
+			return nil
+		})
+	}
+	
+	wg.Wait()
+	
+	return int(atomic.LoadInt64(&productCount)), nil
+}
+
+// scrapeProductPageWithRateLimit scrapes a single product page with rate limiting
+func (a *AuchanScraper) scrapeProductPageWithRateLimit(ctx context.Context, productURL string, limiter *rate.Limiter) (*storage.Product, error) {
+	doc, err := a.FetchPageWithRateLimit(ctx, productURL, limiter)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch product page: %w", err)
+	}
+	
+	// Extract product information from the page
+	return a.extractProductFromPage(doc, productURL)
 }

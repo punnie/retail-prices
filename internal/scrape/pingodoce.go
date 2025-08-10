@@ -1,13 +1,18 @@
 package scraper
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/PuerkitoBio/goquery"
+	"golang.org/x/time/rate"
+	"price-scraper/internal/config"
 	"price-scraper/internal/storage"
 )
 
@@ -62,13 +67,36 @@ func (p *PingoDoceScraper) ScrapeProducts() ([]*storage.Product, error) {
 
 // ScrapeProductsWithCallback scrapes products from Pingo Doce using the API endpoint with streaming storage
 func (p *PingoDoceScraper) ScrapeProductsWithCallback(callback ProductCallback) error {
+	return p.ScrapeProductsWithCallbackAndConfig(callback, nil)
+}
+
+// ScrapeProductsWithCallbackAndConfig scrapes products with configuration support
+func (p *PingoDoceScraper) ScrapeProductsWithCallbackAndConfig(callback ProductCallback, cfg *config.Config) error {
+	// Use default limits if no config provided
+	maxProductsTotal := -1 // No limit by default for Pingo Doce (API-based)
+	pageSize := 20
+	
+	if cfg != nil {
+		maxProductsTotal = cfg.MaxProductsTotal
+		// For Pingo Doce, we can use MaxProductsPerSitemap as page size
+		if cfg.MaxProductsPerSitemap > 0 && cfg.MaxProductsPerSitemap < 100 {
+			pageSize = cfg.MaxProductsPerSitemap
+		}
+	}
+	
 	// Use the API endpoint to get all products with pagination
 	start := 0
-	pageSize := 20
+	totalProducts := 0
 	
 	fmt.Printf("Starting to scrape Pingo Doce products using API endpoint (streaming mode)\n")
 	
 	for {
+		// Check total product limit
+		if maxProductsTotal > 0 && totalProducts >= maxProductsTotal {
+			fmt.Printf("Reached total product limit of %d, stopping\n", maxProductsTotal)
+			break
+		}
+		
 		apiURL := fmt.Sprintf("https://www.pingodoce.pt/on/demandware.store/Sites-pingo-doce-Site/default/Search-UpdateGrid?start=%d&sz=%d", start, pageSize)
 		
 		fmt.Printf("Fetching page: start=%d, size=%d\n", start, pageSize)
@@ -88,7 +116,8 @@ func (p *PingoDoceScraper) ScrapeProductsWithCallback(callback ProductCallback) 
 			break
 		}
 		
-		fmt.Printf("Processed %d products from this page\n", pageProductCount)
+		totalProducts += pageProductCount
+		fmt.Printf("Processed %d products from this page (total: %d)\n", pageProductCount, totalProducts)
 		
 		// If we got less than the page size, we've reached the end
 		if pageProductCount < pageSize {
@@ -99,7 +128,7 @@ func (p *PingoDoceScraper) ScrapeProductsWithCallback(callback ProductCallback) 
 		start += pageSize
 	}
 	
-	fmt.Printf("Finished scraping Pingo Doce\n")
+	fmt.Printf("Finished scraping Pingo Doce. Total products: %d\n", totalProducts)
 	return nil
 }
 
@@ -258,4 +287,169 @@ func (p *PingoDoceScraper) extractProductsFromAPIResponseWithCallback(doc *goque
 // getCurrentTime returns the current time (helper for testing)
 func (p *PingoDoceScraper) getCurrentTime() time.Time {
 	return time.Now()
+}
+
+// ScrapeProductsParallel implements parallel scraping for Pingo Doce
+func (p *PingoDoceScraper) ScrapeProductsParallel(cfg *config.Config, storage storage.Storage, limiter *rate.Limiter) error {
+	ctx := context.Background()
+	
+	fmt.Printf("Starting to scrape Pingo Doce products using API endpoint (parallel mode with %d workers)\n", cfg.MaxConcurrentWorkers)
+	
+	// First, determine how many pages we need to fetch
+	pageSize := 20
+	if cfg.MaxProductsPerSitemap > 0 && cfg.MaxProductsPerSitemap < 100 {
+		pageSize = cfg.MaxProductsPerSitemap
+	}
+	
+	// Create worker pool
+	workerPool := NewWorkerPool(cfg.MaxConcurrentWorkers, limiter)
+	workerPool.Start()
+	defer workerPool.Close()
+	
+	// Counters for tracking progress
+	var totalProducts int64
+	var processedPages int64
+	var mu sync.Mutex
+	
+	// We'll fetch pages in parallel, but we need to be careful about pagination
+	// Start with sequential page discovery, then parallel processing
+	start := 0
+	pageJobs := make([]string, 0)
+	
+	// Discover all available pages first (sequential to understand pagination)
+	fmt.Printf("Discovering available pages...\n")
+	for {
+		// Check total product limit
+		if cfg.MaxProductsTotal > 0 && int(atomic.LoadInt64(&totalProducts)) >= cfg.MaxProductsTotal {
+			break
+		}
+		
+		apiURL := fmt.Sprintf("https://www.pingodoce.pt/on/demandware.store/Sites-pingo-doce-Site/default/Search-UpdateGrid?start=%d&sz=%d", start, pageSize)
+		
+		// Quick check to see if this page has products
+		doc, err := p.FetchPageWithRateLimit(ctx, apiURL, limiter)
+		if err != nil {
+			fmt.Printf("Failed to fetch page at start=%d: %v\n", start, err)
+			break
+		}
+		
+		// Count products on this page
+		productCount := 0
+		doc.Find(".product[data-pid]").Each(func(i int, s *goquery.Selection) {
+			productCount++
+		})
+		
+		if productCount == 0 {
+			fmt.Printf("No products found at start=%d, stopping page discovery\n", start)
+			break
+		}
+		
+		pageJobs = append(pageJobs, apiURL)
+		fmt.Printf("Discovered page %d with %d products (start=%d)\n", len(pageJobs), productCount, start)
+		
+		// If we got less than the page size, we've reached the end
+		if productCount < pageSize {
+			fmt.Printf("Reached end of pagination (got %d < %d products)\n", productCount, pageSize)
+			break
+		}
+		
+		start += pageSize
+		
+		// Limit page discovery to prevent runaway
+		if len(pageJobs) >= 100 {
+			fmt.Printf("Reached page discovery limit of 100 pages\n")
+			break
+		}
+	}
+	
+	fmt.Printf("Discovered %d pages, processing in parallel...\n", len(pageJobs))
+	
+	// Process pages in parallel
+	var wg sync.WaitGroup
+	for i, pageURL := range pageJobs {
+		if cfg.MaxProductsTotal > 0 && atomic.LoadInt64(&totalProducts) >= int64(cfg.MaxProductsTotal) {
+			fmt.Printf("Reached total product limit of %d, stopping\n", cfg.MaxProductsTotal)
+			break
+		}
+		
+		wg.Add(1)
+		go func(pageIndex int, url string) {
+			defer wg.Done()
+			
+			fmt.Printf("Processing page %d/%d\n", pageIndex+1, len(pageJobs))
+			
+			count, err := p.processPageParallel(ctx, url, cfg, storage, workerPool, &totalProducts)
+			if err != nil {
+				fmt.Printf("Warning: failed to process page %s: %v\n", url, err)
+				return
+			}
+			
+			mu.Lock()
+			processedPages++
+			fmt.Printf("Completed page %d/%d, scraped %d products (total: %d)\n", 
+				int(processedPages), len(pageJobs), count, atomic.LoadInt64(&totalProducts))
+			mu.Unlock()
+		}(i, pageURL)
+	}
+	
+	wg.Wait()
+	
+	fmt.Printf("Parallel scraping completed. Total products scraped: %d\n", atomic.LoadInt64(&totalProducts))
+	return nil
+}
+
+// processPageParallel processes a single API page using parallel workers
+func (p *PingoDoceScraper) processPageParallel(ctx context.Context, pageURL string, cfg *config.Config, storage storage.Storage, workerPool *WorkerPool, totalProducts *int64) (int, error) {
+	// Fetch page with rate limiting
+	doc, err := p.FetchPageWithRateLimit(ctx, pageURL, workerPool.limiter)
+	if err != nil {
+		return 0, fmt.Errorf("failed to fetch page: %w", err)
+	}
+	
+	var productCount int64
+	var wg sync.WaitGroup
+	
+	// Process each product in parallel
+	doc.Find(".product[data-pid]").Each(func(i int, s *goquery.Selection) {
+		// Check global product limit
+		if cfg.MaxProductsTotal > 0 && atomic.LoadInt64(totalProducts) >= int64(cfg.MaxProductsTotal) {
+			return
+		}
+		
+		wg.Add(1)
+		
+		// Submit job to worker pool
+		workerPool.Submit(func() error {
+			defer wg.Done()
+			
+			// Check limits again inside worker
+			if cfg.MaxProductsTotal > 0 && atomic.LoadInt64(totalProducts) >= int64(cfg.MaxProductsTotal) {
+				return nil
+			}
+			
+			product := p.extractProductFromElement(s)
+			if product == nil {
+				return nil
+			}
+			
+			if err := storage.SaveProduct(product); err != nil {
+				fmt.Printf("Warning: failed to save product %s: %v\n", product.Name, err)
+				return nil
+			}
+			
+			atomic.AddInt64(&productCount, 1)
+			atomic.AddInt64(totalProducts, 1)
+			
+			// Progress reporting
+			if count := atomic.LoadInt64(&productCount); count%10 == 0 {
+				fmt.Printf("Scraped %d products from current page...\n", count)
+			}
+			
+			return nil
+		})
+	})
+	
+	wg.Wait()
+	
+	return int(atomic.LoadInt64(&productCount)), nil
 }

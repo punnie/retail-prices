@@ -1,10 +1,13 @@
 package scraper
 
 import (
+	"context"
 	"fmt"
 	"net/http"
-	"time"
+	"sync"
 
+	"golang.org/x/time/rate"
+	"price-scraper/internal/config"
 	"price-scraper/internal/storage"
 )
 
@@ -33,18 +36,25 @@ type Manager struct {
 	scrapers map[string]Scraper
 	storage  storage.Storage
 	client   *http.Client
+	config   *config.Config
+	limiter  *rate.Limiter
 }
 
 // NewManager creates a new scraper manager
-func NewManager(storage storage.Storage) *Manager {
+func NewManager(storage storage.Storage, cfg *config.Config) *Manager {
 	client := &http.Client{
-		Timeout: 30 * time.Second,
+		Timeout: cfg.HTTPTimeout,
 	}
+
+	// Create rate limiter
+	limiter := rate.NewLimiter(rate.Limit(cfg.RequestsPerSecond), 1)
 
 	return &Manager{
 		scrapers: make(map[string]Scraper),
 		storage:  storage,
 		client:   client,
+		config:   cfg,
+		limiter:  limiter,
 	}
 }
 
@@ -142,4 +152,111 @@ func (m *Manager) ScrapeAllStoresStreaming() error {
 		}
 	}
 	return nil
+}
+
+// ScrapeStoreParallel scrapes a specific store using parallel workers
+func (m *Manager) ScrapeStoreParallel(storeName string) error {
+	scraper, exists := m.scrapers[storeName]
+	if !exists {
+		return fmt.Errorf("scraper for store '%s' not found", storeName)
+	}
+
+	// Check if scraper supports parallel scraping
+	if parallelScraper, ok := scraper.(ParallelScraper); ok {
+		fmt.Printf("Starting to scrape %s (parallel mode with %d workers)...\n", 
+			scraper.GetName(), m.config.MaxConcurrentWorkers)
+		
+		return parallelScraper.ScrapeProductsParallel(m.config, m.storage, m.limiter)
+	}
+
+	// Fallback to streaming mode
+	fmt.Printf("Scraper %s doesn't support parallel mode, falling back to streaming...\n", scraper.GetName())
+	return m.ScrapeStoreStreaming(storeName)
+}
+
+// ParallelScraper interface for scrapers that support parallel processing
+type ParallelScraper interface {
+	Scraper
+	ScrapeProductsParallel(cfg *config.Config, storage storage.Storage, limiter *rate.Limiter) error
+}
+
+// WorkerPool manages a pool of workers for parallel scraping
+type WorkerPool struct {
+	workers   int
+	jobs      chan func() error
+	results   chan error
+	wg        sync.WaitGroup
+	ctx       context.Context
+	cancel    context.CancelFunc
+	limiter   *rate.Limiter
+}
+
+// NewWorkerPool creates a new worker pool
+func NewWorkerPool(workers int, limiter *rate.Limiter) *WorkerPool {
+	ctx, cancel := context.WithCancel(context.Background())
+	
+	return &WorkerPool{
+		workers: workers,
+		jobs:    make(chan func() error, workers*2), // Buffer for jobs
+		results: make(chan error, workers*2),
+		ctx:     ctx,
+		cancel:  cancel,
+		limiter: limiter,
+	}
+}
+
+// Start starts the worker pool
+func (wp *WorkerPool) Start() {
+	for i := 0; i < wp.workers; i++ {
+		wp.wg.Add(1)
+		go wp.worker()
+	}
+}
+
+// worker is the worker goroutine
+func (wp *WorkerPool) worker() {
+	defer wp.wg.Done()
+	
+	for {
+		select {
+		case job, ok := <-wp.jobs:
+			if !ok {
+				return
+			}
+			
+			// Rate limit the request
+			if err := wp.limiter.Wait(wp.ctx); err != nil {
+				wp.results <- err
+				continue
+			}
+			
+			// Execute the job
+			err := job()
+			wp.results <- err
+			
+		case <-wp.ctx.Done():
+			return
+		}
+	}
+}
+
+// Submit submits a job to the worker pool
+func (wp *WorkerPool) Submit(job func() error) {
+	select {
+	case wp.jobs <- job:
+	case <-wp.ctx.Done():
+	}
+}
+
+// Close closes the worker pool and waits for all workers to finish
+func (wp *WorkerPool) Close() {
+	close(wp.jobs)
+	wp.wg.Wait()
+	wp.cancel()
+	close(wp.results)
+}
+
+// Results returns the results channel
+func (wp *WorkerPool) Results() <-chan error {
+	return wp.results
 }

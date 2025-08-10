@@ -3,13 +3,29 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strconv"
+	"time"
 )
 
 // Config holds the application configuration
 type Config struct {
 	DatabasePath string
 	UserAgent    string
-	RequestDelay int // milliseconds between requests
+	
+	// Scraping performance settings
+	RequestDelay        time.Duration // delay between requests
+	MaxConcurrentWorkers int          // number of parallel workers
+	
+	// Limits
+	MaxSitemaps        int // maximum number of sitemaps to process (-1 for unlimited)
+	MaxProductsTotal   int // maximum total products to scrape (-1 for unlimited)
+	MaxProductsPerSitemap int // maximum products per sitemap (-1 for unlimited)
+	
+	// Timeouts
+	HTTPTimeout time.Duration // HTTP client timeout
+	
+	// Rate limiting
+	RequestsPerSecond float64 // requests per second rate limit
 }
 
 // Load loads the configuration from environment variables or defaults
@@ -34,9 +50,54 @@ func Load() (*Config, error) {
 		userAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 	}
 
+	// Parse performance settings
+	requestDelay := parseEnvDuration("PRICE_SCRAPER_REQUEST_DELAY", 500*time.Millisecond)
+	maxWorkers := parseEnvInt("PRICE_SCRAPER_MAX_WORKERS", 5)
+	maxSitemaps := parseEnvInt("PRICE_SCRAPER_MAX_SITEMAPS", -1) // unlimited by default
+	maxProductsTotal := parseEnvInt("PRICE_SCRAPER_MAX_PRODUCTS_TOTAL", -1) // unlimited by default
+	maxProductsPerSitemap := parseEnvInt("PRICE_SCRAPER_MAX_PRODUCTS_PER_SITEMAP", 100)
+	httpTimeout := parseEnvDuration("PRICE_SCRAPER_HTTP_TIMEOUT", 30*time.Second)
+	requestsPerSecond := parseEnvFloat("PRICE_SCRAPER_REQUESTS_PER_SECOND", 2.0)
+
 	return &Config{
-		DatabasePath: dbPath,
-		UserAgent:    userAgent,
-		RequestDelay: 1000, // 1 second delay between requests
+		DatabasePath:          dbPath,
+		UserAgent:            userAgent,
+		RequestDelay:         requestDelay,
+		MaxConcurrentWorkers: maxWorkers,
+		MaxSitemaps:          maxSitemaps,
+		MaxProductsTotal:     maxProductsTotal,
+		MaxProductsPerSitemap: maxProductsPerSitemap,
+		HTTPTimeout:          httpTimeout,
+		RequestsPerSecond:    requestsPerSecond,
 	}, nil
+}
+
+// parseEnvInt parses an environment variable as an integer with a default value
+func parseEnvInt(key string, defaultValue int) int {
+	if str := os.Getenv(key); str != "" {
+		if val, err := strconv.Atoi(str); err == nil {
+			return val
+		}
+	}
+	return defaultValue
+}
+
+// parseEnvDuration parses an environment variable as a duration with a default value
+func parseEnvDuration(key string, defaultValue time.Duration) time.Duration {
+	if str := os.Getenv(key); str != "" {
+		if val, err := time.ParseDuration(str); err == nil {
+			return val
+		}
+	}
+	return defaultValue
+}
+
+// parseEnvFloat parses an environment variable as a float64 with a default value
+func parseEnvFloat(key string, defaultValue float64) float64 {
+	if str := os.Getenv(key); str != "" {
+		if val, err := strconv.ParseFloat(str, 64); err == nil {
+			return val
+		}
+	}
+	return defaultValue
 }

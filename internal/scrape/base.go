@@ -1,6 +1,7 @@
 package scraper
 
 import (
+	"context"
 	"encoding/xml"
 	"fmt"
 	"net/http"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/PuerkitoBio/goquery"
+	"golang.org/x/time/rate"
 	"price-scraper/internal/storage"
 )
 
@@ -232,6 +234,84 @@ func (b *BaseScraper) FetchXML(url string) ([]byte, error) {
 
 	// Add delay to be respectful to the server
 	time.Sleep(b.delay)
+
+	return body, nil
+}
+
+// FetchPageWithRateLimit fetches a web page with rate limiting
+func (b *BaseScraper) FetchPageWithRateLimit(ctx context.Context, url string, limiter *rate.Limiter) (*goquery.Document, error) {
+	// Wait for rate limiter
+	if err := limiter.Wait(ctx); err != nil {
+		return nil, fmt.Errorf("rate limiter error: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Set("User-Agent", b.userAgent)
+	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8")
+	req.Header.Set("Accept-Language", "pt-PT,pt;q=0.9,en;q=0.8")
+	req.Header.Set("Connection", "keep-alive")
+	req.Header.Set("Upgrade-Insecure-Requests", "1")
+
+	resp, err := b.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("HTTP error: %d", resp.StatusCode)
+	}
+
+	doc, err := goquery.NewDocumentFromReader(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	return doc, nil
+}
+
+// FetchXMLWithRateLimit fetches an XML document with rate limiting
+func (b *BaseScraper) FetchXMLWithRateLimit(ctx context.Context, url string, limiter *rate.Limiter) ([]byte, error) {
+	// Wait for rate limiter
+	if err := limiter.Wait(ctx); err != nil {
+		return nil, fmt.Errorf("rate limiter error: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Set("User-Agent", b.userAgent)
+	req.Header.Set("Accept", "application/xml,text/xml,*/*")
+	req.Header.Set("Accept-Language", "pt-PT,pt;q=0.9,en;q=0.8")
+
+	resp, err := b.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("HTTP error: %d", resp.StatusCode)
+	}
+
+	// Read the response body
+	body := make([]byte, 0)
+	buf := make([]byte, 1024)
+	for {
+		n, err := resp.Body.Read(buf)
+		if n > 0 {
+			body = append(body, buf[:n]...)
+		}
+		if err != nil {
+			break
+		}
+	}
 
 	return body, nil
 }
