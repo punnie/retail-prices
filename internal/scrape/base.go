@@ -148,10 +148,10 @@ func (b *BaseScraper) CreateProduct(name, priceStr, url string) (*storage.Produc
 
 // ScrapeProductsWithCallback provides a default implementation that calls the old method
 // Individual scrapers should override this for true streaming behavior
-func (b *BaseScraper) ScrapeProductsWithCallback(searchTerm string, callback func(*storage.Product) error) error {
+func (b *BaseScraper) ScrapeProductsWithCallback(callback func(*storage.Product) error) error {
 	// This is a fallback implementation that calls the old method
 	// Individual scrapers should override this method for true streaming behavior
-	products, err := b.ScrapeProducts(searchTerm)
+	products, err := b.ScrapeProducts()
 	if err != nil {
 		return err
 	}
@@ -166,7 +166,7 @@ func (b *BaseScraper) ScrapeProductsWithCallback(searchTerm string, callback fun
 }
 
 // ScrapeProducts provides a default implementation that should be overridden by individual scrapers
-func (b *BaseScraper) ScrapeProducts(searchTerm string) ([]*storage.Product, error) {
+func (b *BaseScraper) ScrapeProducts() ([]*storage.Product, error) {
 	return nil, fmt.Errorf("ScrapeProducts not implemented for %s", b.name)
 }
 

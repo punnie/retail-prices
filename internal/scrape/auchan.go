@@ -3,7 +3,6 @@ package scraper
 import (
 	"encoding/json"
 	"fmt"
-	"net/url"
 	"strings"
 
 	"github.com/PuerkitoBio/goquery"
@@ -28,7 +27,7 @@ func NewAuchanScraper() *AuchanScraper {
 }
 
 // ScrapeProducts scrapes products from Auchan using sitemap-based approach
-func (a *AuchanScraper) ScrapeProducts(searchTerm string) ([]*storage.Product, error) {
+func (a *AuchanScraper) ScrapeProducts() ([]*storage.Product, error) {
 	var products []*storage.Product
 	
 	// Use the callback version and collect products
@@ -37,7 +36,7 @@ func (a *AuchanScraper) ScrapeProducts(searchTerm string) ([]*storage.Product, e
 		return nil
 	}
 	
-	err := a.ScrapeProductsWithCallback(searchTerm, callback)
+	err := a.ScrapeProductsWithCallback(callback)
 	if err != nil {
 		return nil, err
 	}
@@ -46,12 +45,7 @@ func (a *AuchanScraper) ScrapeProducts(searchTerm string) ([]*storage.Product, e
 }
 
 // ScrapeProductsWithCallback scrapes products from Auchan using sitemap-based approach with streaming storage
-func (a *AuchanScraper) ScrapeProductsWithCallback(searchTerm string, callback ProductCallback) error {
-	if searchTerm != "" {
-		// If search term is provided, use traditional search approach
-		return a.searchProductsWithCallback(searchTerm, callback)
-	}
-	
+func (a *AuchanScraper) ScrapeProductsWithCallback(callback ProductCallback) error {
 	// Use sitemap-based approach for comprehensive scraping
 	fmt.Printf("Fetching Auchan sitemap index from: %s\n", a.sitemapIndexURL)
 	
@@ -214,59 +208,6 @@ func (a *AuchanScraper) extractProductFromPage(doc *goquery.Document, productURL
 	return product, nil
 }
 
-// searchProducts searches for products using the search functionality (fallback method)
-func (a *AuchanScraper) searchProducts(searchTerm string) ([]*storage.Product, error) {
-	// Encode the search term for URL
-	encodedTerm := url.QueryEscape(searchTerm)
-	searchURL := fmt.Sprintf("%s/pt/pesquisa?q=%s", a.baseURL, encodedTerm)
-	
-	fmt.Printf("Searching Auchan for: %s\n", searchTerm)
-	
-	doc, err := a.FetchPage(searchURL)
-	if err != nil {
-		return nil, fmt.Errorf("failed to fetch search page: %w", err)
-	}
-	
-	return a.extractProductsFromSearchPage(doc, searchURL)
-}
-
-// extractProductsFromSearchPage extracts products from a search results page
-func (a *AuchanScraper) extractProductsFromSearchPage(doc *goquery.Document, pageURL string) ([]*storage.Product, error) {
-	var products []*storage.Product
-	
-	// Common selectors for Auchan search results
-	productSelectors := []string{
-		".product-item",
-		".product-card",
-		".search-result-item",
-		"[data-testid*='product']",
-		".auc-product-tile",
-	}
-	
-	var foundProducts bool
-	
-	for _, selector := range productSelectors {
-		doc.Find(selector).Each(func(i int, s *goquery.Selection) {
-			foundProducts = true
-			
-			// Extract basic product info from search results
-			name := s.Find(".product-name, .product-title, h3, h4").First().Text()
-			price := s.Find(".price, .product-price, [data-testid*='price']").First().Text()
-			
-			if name != "" && price != "" && strings.Contains(price, "€") {
-				if product, err := a.CreateProduct(name, price, pageURL); err == nil {
-					products = append(products, product)
-				}
-			}
-		})
-		
-		if foundProducts {
-			break
-		}
-	}
-	
-	return products, nil
-}
 
 // findProductName tries to find the product name on the page
 func (a *AuchanScraper) findProductName(doc *goquery.Document) string {
@@ -603,59 +544,6 @@ func (a *AuchanScraper) processSitemapWithCallback(sitemapURL string, callback P
 	return productCount, nil
 }
 
-// searchProductsWithCallback searches for products using the search functionality with callback
-func (a *AuchanScraper) searchProductsWithCallback(searchTerm string, callback ProductCallback) error {
-	// Encode the search term for URL
-	encodedTerm := url.QueryEscape(searchTerm)
-	searchURL := fmt.Sprintf("%s/pt/pesquisa?q=%s", a.baseURL, encodedTerm)
-	
-	fmt.Printf("Searching Auchan for: %s\n", searchTerm)
-	
-	doc, err := a.FetchPage(searchURL)
-	if err != nil {
-		return fmt.Errorf("failed to fetch search page: %w", err)
-	}
-	
-	return a.extractProductsFromSearchPageWithCallback(doc, searchURL, callback)
-}
-
-// extractProductsFromSearchPageWithCallback extracts products from a search results page with callback
-func (a *AuchanScraper) extractProductsFromSearchPageWithCallback(doc *goquery.Document, pageURL string, callback ProductCallback) error {
-	// Common selectors for Auchan search results
-	productSelectors := []string{
-		".product-item",
-		".product-card",
-		".search-result-item",
-		"[data-testid*='product']",
-		".auc-product-tile",
-	}
-	
-	var foundProducts bool
-	
-	for _, selector := range productSelectors {
-		doc.Find(selector).Each(func(i int, s *goquery.Selection) {
-			foundProducts = true
-			
-			// Extract basic product info from search results
-			name := s.Find(".product-name, .product-title, h3, h4").First().Text()
-			price := s.Find(".price, .product-price, [data-testid*='price']").First().Text()
-			
-			if name != "" && price != "" && strings.Contains(price, "€") {
-				if product, err := a.CreateProduct(name, price, pageURL); err == nil {
-					if err := callback(product); err != nil {
-						fmt.Printf("Warning: callback failed for product %s: %v\n", product.Name, err)
-					}
-				}
-			}
-		})
-		
-		if foundProducts {
-			break
-		}
-	}
-	
-	return nil
-}
 
 // extractBrandFromJSONLD extracts brand from JSON-LD structured data
 func (a *AuchanScraper) extractBrandFromJSONLD(doc *goquery.Document) string {

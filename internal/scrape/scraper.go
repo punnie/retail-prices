@@ -16,14 +16,13 @@ type Scraper interface {
 	// GetName returns the name of the store
 	GetName() string
 	
-	// ScrapeProducts scrapes products from the store
-	// searchTerm can be empty to scrape all products or a specific term to search for
+	// ScrapeProducts scrapes products from the store using seed URLs/sitemaps
 	// Deprecated: Use ScrapeProductsWithCallback for streaming storage
-	ScrapeProducts(searchTerm string) ([]*storage.Product, error)
+	ScrapeProducts() ([]*storage.Product, error)
 	
 	// ScrapeProductsWithCallback scrapes products from the store and calls the callback for each product
 	// This allows for streaming storage and reduces memory usage
-	ScrapeProductsWithCallback(searchTerm string, callback ProductCallback) error
+	ScrapeProductsWithCallback(callback ProductCallback) error
 	
 	// SetHTTPClient allows setting a custom HTTP client
 	SetHTTPClient(client *http.Client)
@@ -57,7 +56,7 @@ func (m *Manager) RegisterScraper(name string, scraper Scraper) {
 
 // ScrapeStore scrapes a specific store and saves the results
 // Deprecated: Use ScrapeStoreStreaming for better memory usage and crash resilience
-func (m *Manager) ScrapeStore(storeName, searchTerm string) error {
+func (m *Manager) ScrapeStore(storeName string) error {
 	scraper, exists := m.scrapers[storeName]
 	if !exists {
 		return fmt.Errorf("scraper for store '%s' not found", storeName)
@@ -65,7 +64,7 @@ func (m *Manager) ScrapeStore(storeName, searchTerm string) error {
 
 	fmt.Printf("Starting to scrape %s...\n", scraper.GetName())
 	
-	products, err := scraper.ScrapeProducts(searchTerm)
+	products, err := scraper.ScrapeProducts()
 	if err != nil {
 		return fmt.Errorf("failed to scrape %s: %w", scraper.GetName(), err)
 	}
@@ -83,7 +82,7 @@ func (m *Manager) ScrapeStore(storeName, searchTerm string) error {
 }
 
 // ScrapeStoreStreaming scrapes a specific store and saves results as they are scraped
-func (m *Manager) ScrapeStoreStreaming(storeName, searchTerm string) error {
+func (m *Manager) ScrapeStoreStreaming(storeName string) error {
 	scraper, exists := m.scrapers[storeName]
 	if !exists {
 		return fmt.Errorf("scraper for store '%s' not found", storeName)
@@ -104,7 +103,7 @@ func (m *Manager) ScrapeStoreStreaming(storeName, searchTerm string) error {
 		return nil
 	}
 
-	err := scraper.ScrapeProductsWithCallback(searchTerm, callback)
+	err := scraper.ScrapeProductsWithCallback(callback)
 	if err != nil {
 		return fmt.Errorf("failed to scrape %s: %w", scraper.GetName(), err)
 	}
@@ -124,9 +123,9 @@ func (m *Manager) GetAvailableStores() []string {
 
 // ScrapeAllStores scrapes all registered stores
 // Deprecated: Use ScrapeAllStoresStreaming for better memory usage and crash resilience
-func (m *Manager) ScrapeAllStores(searchTerm string) error {
+func (m *Manager) ScrapeAllStores() error {
 	for storeName := range m.scrapers {
-		if err := m.ScrapeStore(storeName, searchTerm); err != nil {
+		if err := m.ScrapeStore(storeName); err != nil {
 			fmt.Printf("Error scraping %s: %v\n", storeName, err)
 			continue
 		}
@@ -135,9 +134,9 @@ func (m *Manager) ScrapeAllStores(searchTerm string) error {
 }
 
 // ScrapeAllStoresStreaming scrapes all registered stores using streaming storage
-func (m *Manager) ScrapeAllStoresStreaming(searchTerm string) error {
+func (m *Manager) ScrapeAllStoresStreaming() error {
 	for storeName := range m.scrapers {
-		if err := m.ScrapeStoreStreaming(storeName, searchTerm); err != nil {
+		if err := m.ScrapeStoreStreaming(storeName); err != nil {
 			fmt.Printf("Error scraping %s: %v\n", storeName, err)
 			continue
 		}

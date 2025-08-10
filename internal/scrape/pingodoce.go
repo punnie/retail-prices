@@ -43,7 +43,7 @@ type GTMInfo struct {
 }
 
 // ScrapeProducts scrapes products from Pingo Doce using the API endpoint
-func (p *PingoDoceScraper) ScrapeProducts(searchTerm string) ([]*storage.Product, error) {
+func (p *PingoDoceScraper) ScrapeProducts() ([]*storage.Product, error) {
 	var allProducts []*storage.Product
 	
 	// Use the callback version and collect products
@@ -52,7 +52,7 @@ func (p *PingoDoceScraper) ScrapeProducts(searchTerm string) ([]*storage.Product
 		return nil
 	}
 	
-	err := p.ScrapeProductsWithCallback(searchTerm, callback)
+	err := p.ScrapeProductsWithCallback(callback)
 	if err != nil {
 		return nil, err
 	}
@@ -61,17 +61,12 @@ func (p *PingoDoceScraper) ScrapeProducts(searchTerm string) ([]*storage.Product
 }
 
 // ScrapeProductsWithCallback scrapes products from Pingo Doce using the API endpoint with streaming storage
-func (p *PingoDoceScraper) ScrapeProductsWithCallback(searchTerm string, callback ProductCallback) error {
+func (p *PingoDoceScraper) ScrapeProductsWithCallback(callback ProductCallback) error {
 	// Use the API endpoint to get all products with pagination
 	start := 0
 	pageSize := 20
 	
 	fmt.Printf("Starting to scrape Pingo Doce products using API endpoint (streaming mode)\n")
-	
-	searchLower := ""
-	if searchTerm != "" {
-		searchLower = strings.ToLower(searchTerm)
-	}
 	
 	for {
 		apiURL := fmt.Sprintf("https://www.pingodoce.pt/on/demandware.store/Sites-pingo-doce-Site/default/Search-UpdateGrid?start=%d&sz=%d", start, pageSize)
@@ -83,7 +78,7 @@ func (p *PingoDoceScraper) ScrapeProductsWithCallback(searchTerm string, callbac
 			return fmt.Errorf("failed to fetch API page: %w", err)
 		}
 		
-		pageProductCount, err := p.extractProductsFromAPIResponseWithCallback(doc, searchLower, callback)
+		pageProductCount, err := p.extractProductsFromAPIResponseWithCallback(doc, callback)
 		if err != nil {
 			return fmt.Errorf("failed to extract products from page: %w", err)
 		}
@@ -240,7 +235,7 @@ func (p *PingoDoceScraper) buildDescription(unit, category string) string {
 }
 
 // extractProductsFromAPIResponseWithCallback extracts products from the API response HTML with callback
-func (p *PingoDoceScraper) extractProductsFromAPIResponseWithCallback(doc *goquery.Document, searchLower string, callback ProductCallback) (int, error) {
+func (p *PingoDoceScraper) extractProductsFromAPIResponseWithCallback(doc *goquery.Document, callback ProductCallback) (int, error) {
 	productCount := 0
 	
 	// Find all product containers
@@ -248,15 +243,6 @@ func (p *PingoDoceScraper) extractProductsFromAPIResponseWithCallback(doc *goque
 		product := p.extractProductFromElement(s)
 		if product == nil {
 			return
-		}
-		
-		// Filter by search term if provided
-		if searchLower != "" {
-			if !strings.Contains(strings.ToLower(product.Name), searchLower) &&
-			   !strings.Contains(strings.ToLower(product.Brand), searchLower) &&
-			   !strings.Contains(strings.ToLower(product.Description), searchLower) {
-				return
-			}
 		}
 		
 		if err := callback(product); err != nil {

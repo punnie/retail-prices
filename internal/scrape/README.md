@@ -8,14 +8,14 @@ An extensible web scraper for Portuguese retail stores that collects product pri
 - **Multiple Store Support**: Currently supports Continente, Pingo Doce, and Auchan
 - **SQLite Storage**: Persistent storage with price history tracking
 - **Nix Development Environment**: Reproducible development setup
-- **Search Functionality**: Search for specific products or scrape categories
+- **Sitemap-based Scraping**: Uses seed URLs and sitemaps for comprehensive product discovery
 - **Price History**: Track price changes over time
 
 ## Supported Stores
 
 - **Continente** (`continente`) - Uses sitemap-based scraping for comprehensive product discovery
-- **Pingo Doce** (`pingodoce`) - Traditional category and search-based scraping
-- **Auchan** (`auchan`) - Traditional category and search-based scraping
+- **Pingo Doce** (`pingodoce`) - Uses API endpoint for comprehensive product discovery
+- **Auchan** (`auchan`) - Uses sitemap-based scraping for comprehensive product discovery
 
 ## Prerequisites
 
@@ -43,22 +43,16 @@ go build .
 
 ### Basic Usage
 
-Scrape all products from a specific store:
+Scrape all products from a specific store using seed URLs and sitemaps:
 ```bash
 ./price-scraper continente
-```
-
-Search for specific products:
-```bash
-./price-scraper continente "leite"
-./price-scraper pingodoce "pão"
-./price-scraper auchan "água"
+./price-scraper pingodoce
+./price-scraper auchan
 ```
 
 ### Available Commands
 
-- `./price-scraper <store_name>` - Scrape all categories from a store
-- `./price-scraper <store_name> <search_term>` - Search for specific products
+- `./price-scraper <store_name>` - Scrape products from a store using seed URLs/sitemaps
 
 ### Environment Variables
 
@@ -91,7 +85,8 @@ To add a new store scraper:
    ```go
    type Scraper interface {
        GetName() string
-       ScrapeProducts(searchTerm string) ([]*storage.Product, error)
+       ScrapeProducts() ([]*storage.Product, error)
+       ScrapeProductsWithCallback(callback ProductCallback) error
        SetHTTPClient(client *http.Client)
    }
    ```

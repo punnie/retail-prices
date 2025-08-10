@@ -3,7 +3,6 @@ package scraper
 import (
 	"encoding/json"
 	"fmt"
-	"net/url"
 	"strings"
 
 	"github.com/PuerkitoBio/goquery"
@@ -28,7 +27,7 @@ func NewContinenteScraper() *ContinenteScraper {
 }
 
 // ScrapeProducts scrapes products from Continente using sitemap-based approach
-func (c *ContinenteScraper) ScrapeProducts(searchTerm string) ([]*storage.Product, error) {
+func (c *ContinenteScraper) ScrapeProducts() ([]*storage.Product, error) {
 	var products []*storage.Product
 	
 	// Use the callback version and collect products
@@ -37,7 +36,7 @@ func (c *ContinenteScraper) ScrapeProducts(searchTerm string) ([]*storage.Produc
 		return nil
 	}
 	
-	err := c.ScrapeProductsWithCallback(searchTerm, callback)
+	err := c.ScrapeProductsWithCallback(callback)
 	if err != nil {
 		return nil, err
 	}
@@ -46,12 +45,7 @@ func (c *ContinenteScraper) ScrapeProducts(searchTerm string) ([]*storage.Produc
 }
 
 // ScrapeProductsWithCallback scrapes products from Continente using sitemap-based approach with streaming storage
-func (c *ContinenteScraper) ScrapeProductsWithCallback(searchTerm string, callback ProductCallback) error {
-	if searchTerm != "" {
-		// If search term is provided, use traditional search approach
-		return c.searchProductsWithCallback(searchTerm, callback)
-	}
-	
+func (c *ContinenteScraper) ScrapeProductsWithCallback(callback ProductCallback) error {
 	// Use sitemap-based approach for comprehensive scraping
 	fmt.Printf("Fetching Continente sitemap index from: %s\n", c.sitemapIndexURL)
 	
@@ -497,21 +491,6 @@ func (c *ContinenteScraper) findProductCategory(doc *goquery.Document) string {
 	return ""
 }
 
-// searchProducts searches for products using the search functionality (fallback method)
-func (c *ContinenteScraper) searchProducts(searchTerm string) ([]*storage.Product, error) {
-	// Encode the search term for URL
-	encodedTerm := url.QueryEscape(searchTerm)
-	searchURL := fmt.Sprintf("%s/pesquisa/?q=%s", c.baseURL, encodedTerm)
-	
-	fmt.Printf("Searching Continente for: %s\n", searchTerm)
-	
-	doc, err := c.FetchPage(searchURL)
-	if err != nil {
-		return nil, fmt.Errorf("failed to fetch search page: %w", err)
-	}
-	
-	return c.extractProductsFromSearchPage(doc, searchURL)
-}
 
 // processSitemapWithCallback processes a single product sitemap and calls callback for each product
 func (c *ContinenteScraper) processSitemapWithCallback(sitemapURL string, callback ProductCallback) (int, error) {
@@ -553,75 +532,4 @@ func (c *ContinenteScraper) processSitemapWithCallback(sitemapURL string, callba
 	}
 	
 	return productCount, nil
-}
-
-// searchProductsWithCallback searches for products using the search functionality with callback
-func (c *ContinenteScraper) searchProductsWithCallback(searchTerm string, callback ProductCallback) error {
-	// Encode the search term for URL
-	encodedTerm := url.QueryEscape(searchTerm)
-	searchURL := fmt.Sprintf("%s/pesquisa/?q=%s", c.baseURL, encodedTerm)
-	
-	fmt.Printf("Searching Continente for: %s\n", searchTerm)
-	
-	doc, err := c.FetchPage(searchURL)
-	if err != nil {
-		return fmt.Errorf("failed to fetch search page: %w", err)
-	}
-	
-	return c.extractProductsFromSearchPageWithCallback(doc, searchURL, callback)
-}
-
-// extractProductsFromSearchPageWithCallback extracts products from a search results page with callback
-func (c *ContinenteScraper) extractProductsFromSearchPageWithCallback(doc *goquery.Document, pageURL string, callback ProductCallback) error {
-	// Common selectors for Continente search results
-	productSelectors := []string{
-		".product-item",
-		".product-card",
-		".search-result-item",
-		"[data-testid*='product']",
-		".ct-product-tile",
-	}
-	
-	var foundProducts bool
-	
-	for _, selector := range productSelectors {
-		doc.Find(selector).Each(func(i int, s *goquery.Selection) {
-			foundProducts = true
-			
-			// Extract basic product info from search results
-			name := s.Find(".product-name, .product-title, h3, h4").First().Text()
-			price := s.Find(".price, .product-price, [data-testid*='price']").First().Text()
-			
-			if name != "" && price != "" && strings.Contains(price, "€") {
-				if product, err := c.CreateProduct(name, price, pageURL); err == nil {
-					if err := callback(product); err != nil {
-						fmt.Printf("Warning: callback failed for product %s: %v\n", product.Name, err)
-					}
-				}
-			}
-		})
-		
-		if foundProducts {
-			break
-		}
-	}
-	
-	return nil
-}
-
-// extractProductsFromSearchPage extracts products from a search results page
-func (c *ContinenteScraper) extractProductsFromSearchPage(doc *goquery.Document, pageURL string) ([]*storage.Product, error) {
-	var products []*storage.Product
-	
-	callback := func(product *storage.Product) error {
-		products = append(products, product)
-		return nil
-	}
-	
-	err := c.extractProductsFromSearchPageWithCallback(doc, pageURL, callback)
-	if err != nil {
-		return nil, err
-	}
-	
-	return products, nil
 }

@@ -30,19 +30,15 @@ func main() {
 	scraperManager.RegisterScraper("auchan", scraper.NewAuchanScraper())
 
 	if len(os.Args) < 2 {
-		fmt.Println("Usage: price-scraper <store_name> [product_search_term]")
+		fmt.Println("Usage: price-scraper <store_name>")
 		fmt.Println("Available stores: continente, pingodoce, auchan")
 		os.Exit(1)
 	}
 
 	storeName := os.Args[1]
-	searchTerm := ""
-	if len(os.Args) > 2 {
-		searchTerm = os.Args[2]
-	}
 
 	// Use streaming scraping for better memory usage and crash resilience
-	if err := scraperManager.ScrapeStoreStreaming(storeName, searchTerm); err != nil {
+	if err := scraperManager.ScrapeStoreStreaming(storeName); err != nil {
 		log.Fatalf("Failed to scrape store %s: %v", storeName, err)
 	}
 
