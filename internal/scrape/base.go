@@ -146,6 +146,30 @@ func (b *BaseScraper) CreateProduct(name, priceStr, url string) (*storage.Produc
 	}, nil
 }
 
+// ScrapeProductsWithCallback provides a default implementation that calls the old method
+// Individual scrapers should override this for true streaming behavior
+func (b *BaseScraper) ScrapeProductsWithCallback(searchTerm string, callback func(*storage.Product) error) error {
+	// This is a fallback implementation that calls the old method
+	// Individual scrapers should override this method for true streaming behavior
+	products, err := b.ScrapeProducts(searchTerm)
+	if err != nil {
+		return err
+	}
+
+	for _, product := range products {
+		if err := callback(product); err != nil {
+			return fmt.Errorf("callback failed for product %s: %w", product.Name, err)
+		}
+	}
+
+	return nil
+}
+
+// ScrapeProducts provides a default implementation that should be overridden by individual scrapers
+func (b *BaseScraper) ScrapeProducts(searchTerm string) ([]*storage.Product, error) {
+	return nil, fmt.Errorf("ScrapeProducts not implemented for %s", b.name)
+}
+
 // SitemapIndex represents the structure of a sitemap index XML
 type SitemapIndex struct {
 	XMLName  xml.Name  `xml:"sitemapindex"`

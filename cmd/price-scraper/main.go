@@ -41,9 +41,10 @@ func main() {
 		searchTerm = os.Args[2]
 	}
 
-	if err := scraperManager.ScrapeStore(storeName, searchTerm); err != nil {
+	// Use streaming scraping for better memory usage and crash resilience
+	if err := scraperManager.ScrapeStoreStreaming(storeName, searchTerm); err != nil {
 		log.Fatalf("Failed to scrape store %s: %v", storeName, err)
 	}
 
-	fmt.Printf("Successfully scraped %s\n", storeName)
+	fmt.Printf("Successfully scraped %s using streaming mode\n", storeName)
 }

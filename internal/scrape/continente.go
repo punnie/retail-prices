@@ -31,9 +31,25 @@ func NewContinenteScraper() *ContinenteScraper {
 func (c *ContinenteScraper) ScrapeProducts(searchTerm string) ([]*storage.Product, error) {
 	var products []*storage.Product
 	
+	// Use the callback version and collect products
+	callback := func(product *storage.Product) error {
+		products = append(products, product)
+		return nil
+	}
+	
+	err := c.ScrapeProductsWithCallback(searchTerm, callback)
+	if err != nil {
+		return nil, err
+	}
+	
+	return products, nil
+}
+
+// ScrapeProductsWithCallback scrapes products from Continente using sitemap-based approach with streaming storage
+func (c *ContinenteScraper) ScrapeProductsWithCallback(searchTerm string, callback ProductCallback) error {
 	if searchTerm != "" {
 		// If search term is provided, use traditional search approach
-		return c.searchProducts(searchTerm)
+		return c.searchProductsWithCallback(searchTerm, callback)
 	}
 	
 	// Use sitemap-based approach for comprehensive scraping
@@ -42,12 +58,12 @@ func (c *ContinenteScraper) ScrapeProducts(searchTerm string) ([]*storage.Produc
 	// Fetch and parse sitemap index
 	xmlData, err := c.FetchXML(c.sitemapIndexURL)
 	if err != nil {
-		return nil, fmt.Errorf("failed to fetch sitemap index: %w", err)
+		return fmt.Errorf("failed to fetch sitemap index: %w", err)
 	}
 	
 	sitemapIndex, err := c.ParseSitemapIndex(xmlData)
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse sitemap index: %w", err)
+		return fmt.Errorf("failed to parse sitemap index: %w", err)
 	}
 	
 	// Filter product sitemaps
@@ -55,25 +71,26 @@ func (c *ContinenteScraper) ScrapeProducts(searchTerm string) ([]*storage.Produc
 	fmt.Printf("Found %d product sitemaps\n", len(productSitemaps))
 	
 	// Process each product sitemap
+	productCount := 0
 	for i, sitemap := range productSitemaps {
 		fmt.Printf("Processing sitemap %d/%d: %s\n", i+1, len(productSitemaps), sitemap.Loc)
 		
-		sitemapProducts, err := c.processSitemap(sitemap.Loc)
+		sitemapProductCount, err := c.processSitemapWithCallback(sitemap.Loc, callback)
 		if err != nil {
 			fmt.Printf("Warning: failed to process sitemap %s: %v\n", sitemap.Loc, err)
 			continue
 		}
 		
-		products = append(products, sitemapProducts...)
+		productCount += sitemapProductCount
 		
 		// Limit the number of products to avoid overwhelming the system
-		if len(products) >= 100 {
+		if productCount >= 100 {
 			fmt.Printf("Reached product limit of 100, stopping\n")
 			break
 		}
 	}
 	
-	return products, nil
+	return nil
 }
 
 // filterProductSitemaps filters sitemaps to only include product sitemaps
@@ -496,10 +513,66 @@ func (c *ContinenteScraper) searchProducts(searchTerm string) ([]*storage.Produc
 	return c.extractProductsFromSearchPage(doc, searchURL)
 }
 
-// extractProductsFromSearchPage extracts products from a search results page
-func (c *ContinenteScraper) extractProductsFromSearchPage(doc *goquery.Document, pageURL string) ([]*storage.Product, error) {
-	var products []*storage.Product
+// processSitemapWithCallback processes a single product sitemap and calls callback for each product
+func (c *ContinenteScraper) processSitemapWithCallback(sitemapURL string, callback ProductCallback) (int, error) {
+	// Fetch sitemap XML
+	xmlData, err := c.FetchXML(sitemapURL)
+	if err != nil {
+		return 0, fmt.Errorf("failed to fetch sitemap: %w", err)
+	}
 	
+	// Parse sitemap
+	urlSet, err := c.ParseSitemap(xmlData)
+	if err != nil {
+		return 0, fmt.Errorf("failed to parse sitemap: %w", err)
+	}
+	
+	fmt.Printf("Found %d product URLs in sitemap\n", len(urlSet.URLs))
+	
+	// Process each product URL (limit to avoid overwhelming)
+	maxProducts := 20 // Limit per sitemap
+	productCount := 0
+	for i, urlEntry := range urlSet.URLs {
+		if i >= maxProducts {
+			fmt.Printf("Reached per-sitemap limit of %d products\n", maxProducts)
+			break
+		}
+		
+		product, err := c.scrapeProductPage(urlEntry.Loc)
+		if err != nil {
+			fmt.Printf("Warning: failed to scrape product %s: %v\n", urlEntry.Loc, err)
+			continue
+		}
+		
+		if product != nil {
+			if err := callback(product); err != nil {
+				return productCount, fmt.Errorf("callback failed for product %s: %w", product.Name, err)
+			}
+			productCount++
+		}
+	}
+	
+	return productCount, nil
+}
+
+// searchProductsWithCallback searches for products using the search functionality with callback
+func (c *ContinenteScraper) searchProductsWithCallback(searchTerm string, callback ProductCallback) error {
+	// Encode the search term for URL
+	encodedTerm := url.QueryEscape(searchTerm)
+	searchURL := fmt.Sprintf("%s/pesquisa/?q=%s", c.baseURL, encodedTerm)
+	
+	fmt.Printf("Searching Continente for: %s\n", searchTerm)
+	
+	doc, err := c.FetchPage(searchURL)
+	if err != nil {
+		return fmt.Errorf("failed to fetch search page: %w", err)
+	}
+	
+	return c.extractProductsFromSearchPageWithCallback(doc, searchURL, callback)
+}
+
+// extractProductsFromSearchPageWithCallback extracts products from a search results page with callback
+func (c *ContinenteScraper) extractProductsFromSearchPageWithCallback(doc *goquery.Document, pageURL string, callback ProductCallback) error {
 	// Common selectors for Continente search results
 	productSelectors := []string{
 		".product-item",
@@ -521,7 +594,9 @@ func (c *ContinenteScraper) extractProductsFromSearchPage(doc *goquery.Document,
 			
 			if name != "" && price != "" && strings.Contains(price, "€") {
 				if product, err := c.CreateProduct(name, price, pageURL); err == nil {
-					products = append(products, product)
+					if err := callback(product); err != nil {
+						fmt.Printf("Warning: callback failed for product %s: %v\n", product.Name, err)
+					}
 				}
 			}
 		})
@@ -529,6 +604,23 @@ func (c *ContinenteScraper) extractProductsFromSearchPage(doc *goquery.Document,
 		if foundProducts {
 			break
 		}
+	}
+	
+	return nil
+}
+
+// extractProductsFromSearchPage extracts products from a search results page
+func (c *ContinenteScraper) extractProductsFromSearchPage(doc *goquery.Document, pageURL string) ([]*storage.Product, error) {
+	var products []*storage.Product
+	
+	callback := func(product *storage.Product) error {
+		products = append(products, product)
+		return nil
+	}
+	
+	err := c.extractProductsFromSearchPageWithCallback(doc, pageURL, callback)
+	if err != nil {
+		return nil, err
 	}
 	
 	return products, nil

@@ -31,9 +31,25 @@ func NewAuchanScraper() *AuchanScraper {
 func (a *AuchanScraper) ScrapeProducts(searchTerm string) ([]*storage.Product, error) {
 	var products []*storage.Product
 	
+	// Use the callback version and collect products
+	callback := func(product *storage.Product) error {
+		products = append(products, product)
+		return nil
+	}
+	
+	err := a.ScrapeProductsWithCallback(searchTerm, callback)
+	if err != nil {
+		return nil, err
+	}
+	
+	return products, nil
+}
+
+// ScrapeProductsWithCallback scrapes products from Auchan using sitemap-based approach with streaming storage
+func (a *AuchanScraper) ScrapeProductsWithCallback(searchTerm string, callback ProductCallback) error {
 	if searchTerm != "" {
 		// If search term is provided, use traditional search approach
-		return a.searchProducts(searchTerm)
+		return a.searchProductsWithCallback(searchTerm, callback)
 	}
 	
 	// Use sitemap-based approach for comprehensive scraping
@@ -42,12 +58,12 @@ func (a *AuchanScraper) ScrapeProducts(searchTerm string) ([]*storage.Product, e
 	// Fetch and parse sitemap index
 	xmlData, err := a.FetchXML(a.sitemapIndexURL)
 	if err != nil {
-		return nil, fmt.Errorf("failed to fetch sitemap index: %w", err)
+		return fmt.Errorf("failed to fetch sitemap index: %w", err)
 	}
 	
 	sitemapIndex, err := a.ParseSitemapIndex(xmlData)
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse sitemap index: %w", err)
+		return fmt.Errorf("failed to parse sitemap index: %w", err)
 	}
 	
 	// Filter product sitemaps
@@ -55,25 +71,26 @@ func (a *AuchanScraper) ScrapeProducts(searchTerm string) ([]*storage.Product, e
 	fmt.Printf("Found %d product sitemaps\n", len(productSitemaps))
 	
 	// Process each product sitemap
+	productCount := 0
 	for i, sitemap := range productSitemaps {
 		fmt.Printf("Processing sitemap %d/%d: %s\n", i+1, len(productSitemaps), sitemap.Loc)
 		
-		sitemapProducts, err := a.processSitemap(sitemap.Loc)
+		sitemapProductCount, err := a.processSitemapWithCallback(sitemap.Loc, callback)
 		if err != nil {
 			fmt.Printf("Warning: failed to process sitemap %s: %v\n", sitemap.Loc, err)
 			continue
 		}
 		
-		products = append(products, sitemapProducts...)
+		productCount += sitemapProductCount
 		
 		// Limit the number of products to avoid overwhelming the system
-		if len(products) >= 100 {
+		if productCount >= 100 {
 			fmt.Printf("Reached product limit of 100, stopping\n")
 			break
 		}
 	}
 	
-	return products, nil
+	return nil
 }
 
 // filterProductSitemaps filters sitemaps to only include product sitemaps
@@ -542,6 +559,102 @@ func (a *AuchanScraper) extractPriceFromJSONLD(doc *goquery.Document) string {
 	})
 	
 	return foundPrice
+}
+
+// processSitemapWithCallback processes a single product sitemap and calls callback for each product
+func (a *AuchanScraper) processSitemapWithCallback(sitemapURL string, callback ProductCallback) (int, error) {
+	// Fetch sitemap XML
+	xmlData, err := a.FetchXML(sitemapURL)
+	if err != nil {
+		return 0, fmt.Errorf("failed to fetch sitemap: %w", err)
+	}
+	
+	// Parse sitemap
+	urlSet, err := a.ParseSitemap(xmlData)
+	if err != nil {
+		return 0, fmt.Errorf("failed to parse sitemap: %w", err)
+	}
+	
+	fmt.Printf("Found %d product URLs in sitemap\n", len(urlSet.URLs))
+	
+	// Process each product URL (limit to avoid overwhelming)
+	maxProducts := 20 // Limit per sitemap
+	productCount := 0
+	for i, urlEntry := range urlSet.URLs {
+		if i >= maxProducts {
+			fmt.Printf("Reached per-sitemap limit of %d products\n", maxProducts)
+			break
+		}
+		
+		product, err := a.scrapeProductPage(urlEntry.Loc)
+		if err != nil {
+			fmt.Printf("Warning: failed to scrape product %s: %v\n", urlEntry.Loc, err)
+			continue
+		}
+		
+		if product != nil {
+			if err := callback(product); err != nil {
+				return productCount, fmt.Errorf("callback failed for product %s: %w", product.Name, err)
+			}
+			productCount++
+		}
+	}
+	
+	return productCount, nil
+}
+
+// searchProductsWithCallback searches for products using the search functionality with callback
+func (a *AuchanScraper) searchProductsWithCallback(searchTerm string, callback ProductCallback) error {
+	// Encode the search term for URL
+	encodedTerm := url.QueryEscape(searchTerm)
+	searchURL := fmt.Sprintf("%s/pt/pesquisa?q=%s", a.baseURL, encodedTerm)
+	
+	fmt.Printf("Searching Auchan for: %s\n", searchTerm)
+	
+	doc, err := a.FetchPage(searchURL)
+	if err != nil {
+		return fmt.Errorf("failed to fetch search page: %w", err)
+	}
+	
+	return a.extractProductsFromSearchPageWithCallback(doc, searchURL, callback)
+}
+
+// extractProductsFromSearchPageWithCallback extracts products from a search results page with callback
+func (a *AuchanScraper) extractProductsFromSearchPageWithCallback(doc *goquery.Document, pageURL string, callback ProductCallback) error {
+	// Common selectors for Auchan search results
+	productSelectors := []string{
+		".product-item",
+		".product-card",
+		".search-result-item",
+		"[data-testid*='product']",
+		".auc-product-tile",
+	}
+	
+	var foundProducts bool
+	
+	for _, selector := range productSelectors {
+		doc.Find(selector).Each(func(i int, s *goquery.Selection) {
+			foundProducts = true
+			
+			// Extract basic product info from search results
+			name := s.Find(".product-name, .product-title, h3, h4").First().Text()
+			price := s.Find(".price, .product-price, [data-testid*='price']").First().Text()
+			
+			if name != "" && price != "" && strings.Contains(price, "€") {
+				if product, err := a.CreateProduct(name, price, pageURL); err == nil {
+					if err := callback(product); err != nil {
+						fmt.Printf("Warning: callback failed for product %s: %v\n", product.Name, err)
+					}
+				}
+			}
+		})
+		
+		if foundProducts {
+			break
+		}
+	}
+	
+	return nil
 }
 
 // extractBrandFromJSONLD extracts brand from JSON-LD structured data

@@ -46,11 +46,32 @@ type GTMInfo struct {
 func (p *PingoDoceScraper) ScrapeProducts(searchTerm string) ([]*storage.Product, error) {
 	var allProducts []*storage.Product
 	
+	// Use the callback version and collect products
+	callback := func(product *storage.Product) error {
+		allProducts = append(allProducts, product)
+		return nil
+	}
+	
+	err := p.ScrapeProductsWithCallback(searchTerm, callback)
+	if err != nil {
+		return nil, err
+	}
+	
+	return allProducts, nil
+}
+
+// ScrapeProductsWithCallback scrapes products from Pingo Doce using the API endpoint with streaming storage
+func (p *PingoDoceScraper) ScrapeProductsWithCallback(searchTerm string, callback ProductCallback) error {
 	// Use the API endpoint to get all products with pagination
 	start := 0
 	pageSize := 20
 	
-	fmt.Printf("Starting to scrape Pingo Doce products using API endpoint\n")
+	fmt.Printf("Starting to scrape Pingo Doce products using API endpoint (streaming mode)\n")
+	
+	searchLower := ""
+	if searchTerm != "" {
+		searchLower = strings.ToLower(searchTerm)
+	}
 	
 	for {
 		apiURL := fmt.Sprintf("https://www.pingodoce.pt/on/demandware.store/Sites-pingo-doce-Site/default/Search-UpdateGrid?start=%d&sz=%d", start, pageSize)
@@ -59,49 +80,32 @@ func (p *PingoDoceScraper) ScrapeProducts(searchTerm string) ([]*storage.Product
 		
 		doc, err := p.FetchPage(apiURL)
 		if err != nil {
-			return nil, fmt.Errorf("failed to fetch API page: %w", err)
+			return fmt.Errorf("failed to fetch API page: %w", err)
 		}
 		
-		products := p.ExtractProductsFromAPIResponse(doc)
+		pageProductCount, err := p.extractProductsFromAPIResponseWithCallback(doc, searchLower, callback)
+		if err != nil {
+			return fmt.Errorf("failed to extract products from page: %w", err)
+		}
 		
-		if len(products) == 0 {
+		if pageProductCount == 0 {
 			fmt.Printf("No products found on this page, stopping pagination\n")
 			break
 		}
 		
-		allProducts = append(allProducts, products...)
-		
-		fmt.Printf("Extracted %d products from this page (total: %d)\n", len(products), len(allProducts))
+		fmt.Printf("Processed %d products from this page\n", pageProductCount)
 		
 		// If we got less than the page size, we've reached the end
-		if len(products) < pageSize {
-			fmt.Printf("Reached end of pagination (got %d < %d products)\n", len(products), pageSize)
+		if pageProductCount < pageSize {
+			fmt.Printf("Reached end of pagination (got %d < %d products)\n", pageProductCount, pageSize)
 			break
 		}
 		
 		start += pageSize
 	}
 	
-	fmt.Printf("Finished scraping Pingo Doce: %d total products\n", len(allProducts))
-	
-	// Filter by search term if provided
-	if searchTerm != "" {
-		filteredProducts := make([]*storage.Product, 0)
-		searchLower := strings.ToLower(searchTerm)
-		
-		for _, product := range allProducts {
-			if strings.Contains(strings.ToLower(product.Name), searchLower) ||
-			   strings.Contains(strings.ToLower(product.Brand), searchLower) ||
-			   strings.Contains(strings.ToLower(product.Description), searchLower) {
-				filteredProducts = append(filteredProducts, product)
-			}
-		}
-		
-		fmt.Printf("Filtered to %d products matching '%s'\n", len(filteredProducts), searchTerm)
-		return filteredProducts, nil
-	}
-	
-	return allProducts, nil
+	fmt.Printf("Finished scraping Pingo Doce\n")
+	return nil
 }
 
 // ExtractProductsFromAPIResponse extracts products from the API response HTML
@@ -233,6 +237,36 @@ func (p *PingoDoceScraper) buildDescription(unit, category string) string {
 	}
 	
 	return strings.Join(parts, " | ")
+}
+
+// extractProductsFromAPIResponseWithCallback extracts products from the API response HTML with callback
+func (p *PingoDoceScraper) extractProductsFromAPIResponseWithCallback(doc *goquery.Document, searchLower string, callback ProductCallback) (int, error) {
+	productCount := 0
+	
+	// Find all product containers
+	doc.Find(".product[data-pid]").Each(func(i int, s *goquery.Selection) {
+		product := p.extractProductFromElement(s)
+		if product == nil {
+			return
+		}
+		
+		// Filter by search term if provided
+		if searchLower != "" {
+			if !strings.Contains(strings.ToLower(product.Name), searchLower) &&
+			   !strings.Contains(strings.ToLower(product.Brand), searchLower) &&
+			   !strings.Contains(strings.ToLower(product.Description), searchLower) {
+				return
+			}
+		}
+		
+		if err := callback(product); err != nil {
+			fmt.Printf("Warning: callback failed for product %s: %v\n", product.Name, err)
+		} else {
+			productCount++
+		}
+	})
+	
+	return productCount, nil
 }
 
 // getCurrentTime returns the current time (helper for testing)
