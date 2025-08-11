@@ -21,6 +21,99 @@ A high-performance, configurable web scraper for Portuguese online food retailer
 
 ## Installation
 
+### Using Nix (Recommended)
+
+This project provides both flakes and legacy Nix support for easy installation and integration.
+
+#### With Nix Flakes
+
+```bash
+# Run directly from the repository
+nix run github:punnie/price-scraper -- continente
+
+# Install to your profile
+nix profile install github:punnie/price-scraper
+
+# Build locally
+git clone <repository-url>
+cd price-scraper
+nix build
+./result/bin/price-scraper continente
+```
+
+#### Legacy Nix
+
+```bash
+# Build with nix-build
+git clone <repository-url>
+cd price-scraper
+nix-build
+./result/bin/price-scraper continente
+
+# Install to your profile
+nix-env -f . -i
+```
+
+#### Integration in NixOS/Home Manager
+
+**In your flake.nix:**
+```nix
+{
+  inputs = {
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    price-scraper.url = "github:punnie/price-scraper";
+  };
+
+  outputs = { self, nixpkgs, price-scraper }: {
+    nixosConfigurations.myhost = nixpkgs.lib.nixosSystem {
+      system = "x86_64-linux";
+      modules = [
+        {
+          environment.systemPackages = [
+            price-scraper.packages.x86_64-linux.default
+          ];
+        }
+      ];
+    };
+  };
+}
+```
+
+**In configuration.nix (legacy):**
+```nix
+{ pkgs, ... }:
+
+let
+  price-scraper = pkgs.callPackage (pkgs.fetchFromGitHub {
+    owner = "punnie";
+    repo = "price-scraper";
+    rev = "main"; # or specific commit
+    sha256 = "..."; # nix-prefetch-url --unpack <github-url>
+  }) {};
+in
+{
+  environment.systemPackages = [ price-scraper ];
+}
+```
+
+**In Home Manager:**
+```nix
+{ pkgs, ... }:
+
+{
+  home.packages = [
+    (pkgs.callPackage (pkgs.fetchFromGitHub {
+      owner = "punnie";
+      repo = "price-scraper";
+      rev = "main";
+      sha256 = "...";
+    }) {})
+  ];
+}
+```
+
+### Manual Installation
+
 ```bash
 git clone <repository-url>
 cd price-scraper
