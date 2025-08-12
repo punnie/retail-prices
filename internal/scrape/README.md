@@ -54,6 +54,49 @@ nix-build
 nix-env -f . -i
 ```
 
+#### Using as an Overlay
+
+This project provides a Nix overlay that makes the `price-scraper` package available in your nixpkgs instance:
+
+**With flakes:**
+```nix
+{
+  inputs = {
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    price-scraper.url = "github:punnie/price-scraper";
+  };
+
+  outputs = { self, nixpkgs, price-scraper }: {
+    nixosConfigurations.myhost = nixpkgs.lib.nixosSystem {
+      system = "x86_64-linux";
+      modules = [
+        {
+          nixpkgs.overlays = [ price-scraper.overlays.default ];
+          environment.systemPackages = with pkgs; [
+            price-scraper  # Now available via overlay
+          ];
+        }
+      ];
+    };
+  };
+}
+```
+
+**Legacy (non-flake):**
+```nix
+let
+  price-scraper-flake = builtins.getFlake "github:punnie/price-scraper";
+  pkgs = import <nixpkgs> {
+    overlays = [ price-scraper-flake.overlay ];
+  };
+in
+{
+  environment.systemPackages = with pkgs; [
+    price-scraper  # Available via overlay
+  ];
+}
+```
+
 #### Integration in NixOS/Home Manager
 
 **In your flake.nix:**
