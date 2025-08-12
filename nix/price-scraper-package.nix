@@ -5,7 +5,7 @@
 
 pkgs.buildGoModule rec {
   pname = "price-scraper";
-  version = "0.1.0";
+  version = "0.2.0";
   
   src = pkgs.lib.cleanSourceWith {
     src = ./.;
@@ -23,7 +23,7 @@ pkgs.buildGoModule rec {
   ldflags = [
     "-s"
     "-w"
-    "-X main.version=0.1.0"
+    "-X main.version=${version}"
   ];
   
   # Runtime dependencies
