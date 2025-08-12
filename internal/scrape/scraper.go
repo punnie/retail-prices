@@ -114,9 +114,17 @@ func (m *Manager) ScrapeStoreStreaming(storeName string) error {
 		return nil
 	}
 
-	err := scraper.ScrapeProductsWithCallback(callback)
-	if err != nil {
-		return fmt.Errorf("failed to scrape %s: %w", scraper.GetName(), err)
+	// Check if scraper supports configuration
+	if configScraper, ok := scraper.(ConfigurableScraper); ok {
+		err := configScraper.ScrapeProductsWithCallbackAndConfig(callback, m.config)
+		if err != nil {
+			return fmt.Errorf("failed to scrape %s: %w", scraper.GetName(), err)
+		}
+	} else {
+		err := scraper.ScrapeProductsWithCallback(callback)
+		if err != nil {
+			return fmt.Errorf("failed to scrape %s: %w", scraper.GetName(), err)
+		}
 	}
 
 	fmt.Printf("Successfully scraped and saved %d products from %s\n", productCount, scraper.GetName())
@@ -173,6 +181,12 @@ func (m *Manager) ScrapeStoreParallel(storeName string) error {
 	// Fallback to streaming mode
 	fmt.Printf("Scraper %s doesn't support parallel mode, falling back to streaming...\n", scraper.GetName())
 	return m.ScrapeStoreStreaming(storeName)
+}
+
+// ConfigurableScraper interface for scrapers that support configuration
+type ConfigurableScraper interface {
+	Scraper
+	ScrapeProductsWithCallbackAndConfig(callback ProductCallback, cfg *config.Config) error
 }
 
 // ParallelScraper interface for scrapers that support parallel processing

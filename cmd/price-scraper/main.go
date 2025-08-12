@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
+	"time"
 
 	"price-scraper/internal/config"
 	"price-scraper/internal/scraper"
@@ -30,9 +32,11 @@ func main() {
 	scraperManager.RegisterScraper("auchan", scraper.NewAuchanScraper())
 
 	if len(os.Args) < 2 {
-		fmt.Println("Usage: price-scraper <store_name> [mode]")
+		fmt.Println("Usage: price-scraper <store_name> [mode] [--since=YYYY-MM-DD]")
 		fmt.Println("Available stores: continente, pingodoce, auchan")
 		fmt.Println("Available modes: streaming (default), parallel")
+		fmt.Println("Options:")
+		fmt.Println("  --since=YYYY-MM-DD  Only scrape products modified after this date")
 		fmt.Printf("\nConfiguration (via environment variables):\n")
 		fmt.Printf("  PRICE_SCRAPER_MAX_WORKERS=%d (parallel workers)\n", cfg.MaxConcurrentWorkers)
 		fmt.Printf("  PRICE_SCRAPER_MAX_SITEMAPS=%d (max sitemaps, -1=unlimited)\n", cfg.MaxSitemaps)
@@ -46,9 +50,27 @@ func main() {
 
 	storeName := os.Args[1]
 	mode := "streaming"
-	if len(os.Args) > 2 {
-		mode = os.Args[2]
+	var sinceDate *time.Time
+
+	// Parse remaining arguments
+	for i := 2; i < len(os.Args); i++ {
+		arg := os.Args[i]
+		if strings.HasPrefix(arg, "--since=") {
+			dateStr := strings.TrimPrefix(arg, "--since=")
+			parsedDate, err := time.Parse("2006-01-02", dateStr)
+			if err != nil {
+				log.Fatalf("Invalid date format for --since parameter. Use YYYY-MM-DD format: %v", err)
+			}
+			sinceDate = &parsedDate
+		} else if arg == "streaming" || arg == "parallel" {
+			mode = arg
+		} else {
+			log.Fatalf("Unknown argument: %s", arg)
+		}
 	}
+
+	// Set the sinceDate in configuration
+	cfg.SinceDate = sinceDate
 
 	fmt.Printf("Configuration:\n")
 	fmt.Printf("  Workers: %d\n", cfg.MaxConcurrentWorkers)
@@ -58,6 +80,9 @@ func main() {
 	fmt.Printf("  Request Delay: %v\n", cfg.RequestDelay)
 	fmt.Printf("  Requests Per Second: %.1f\n", cfg.RequestsPerSecond)
 	fmt.Printf("  HTTP Timeout: %v\n", cfg.HTTPTimeout)
+	if cfg.SinceDate != nil {
+		fmt.Printf("  Since Date: %s\n", cfg.SinceDate.Format("2006-01-02"))
+	}
 	fmt.Println()
 
 	switch mode {

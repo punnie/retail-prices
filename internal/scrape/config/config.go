@@ -11,21 +11,24 @@ import (
 type Config struct {
 	DatabasePath string
 	UserAgent    string
-	
+
 	// Scraping performance settings
-	RequestDelay        time.Duration // delay between requests
-	MaxConcurrentWorkers int          // number of parallel workers
-	
+	RequestDelay         time.Duration // delay between requests
+	MaxConcurrentWorkers int           // number of parallel workers
+
 	// Limits
-	MaxSitemaps        int // maximum number of sitemaps to process (-1 for unlimited)
-	MaxProductsTotal   int // maximum total products to scrape (-1 for unlimited)
+	MaxSitemaps           int // maximum number of sitemaps to process (-1 for unlimited)
+	MaxProductsTotal      int // maximum total products to scrape (-1 for unlimited)
 	MaxProductsPerSitemap int // maximum products per sitemap (-1 for unlimited)
-	
+
 	// Timeouts
 	HTTPTimeout time.Duration // HTTP client timeout
-	
+
 	// Rate limiting
 	RequestsPerSecond float64 // requests per second rate limit
+
+	// Date filtering
+	SinceDate *time.Time // only scrape products modified after this date
 }
 
 // Load loads the configuration from environment variables or defaults
@@ -53,7 +56,7 @@ func Load() (*Config, error) {
 	// Parse performance settings
 	requestDelay := parseEnvDuration("PRICE_SCRAPER_REQUEST_DELAY", 500*time.Millisecond)
 	maxWorkers := parseEnvInt("PRICE_SCRAPER_MAX_WORKERS", 5)
-	maxSitemaps := parseEnvInt("PRICE_SCRAPER_MAX_SITEMAPS", -1) // unlimited by default
+	maxSitemaps := parseEnvInt("PRICE_SCRAPER_MAX_SITEMAPS", -1)            // unlimited by default
 	maxProductsTotal := parseEnvInt("PRICE_SCRAPER_MAX_PRODUCTS_TOTAL", -1) // unlimited by default
 	maxProductsPerSitemap := parseEnvInt("PRICE_SCRAPER_MAX_PRODUCTS_PER_SITEMAP", 100)
 	httpTimeout := parseEnvDuration("PRICE_SCRAPER_HTTP_TIMEOUT", 30*time.Second)
@@ -61,14 +64,14 @@ func Load() (*Config, error) {
 
 	return &Config{
 		DatabasePath:          dbPath,
-		UserAgent:            userAgent,
-		RequestDelay:         requestDelay,
-		MaxConcurrentWorkers: maxWorkers,
-		MaxSitemaps:          maxSitemaps,
-		MaxProductsTotal:     maxProductsTotal,
+		UserAgent:             userAgent,
+		RequestDelay:          requestDelay,
+		MaxConcurrentWorkers:  maxWorkers,
+		MaxSitemaps:           maxSitemaps,
+		MaxProductsTotal:      maxProductsTotal,
 		MaxProductsPerSitemap: maxProductsPerSitemap,
-		HTTPTimeout:          httpTimeout,
-		RequestsPerSecond:    requestsPerSecond,
+		HTTPTimeout:           httpTimeout,
+		RequestsPerSecond:     requestsPerSecond,
 	}, nil
 }
 

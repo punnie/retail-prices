@@ -338,3 +338,34 @@ func (b *BaseScraper) ParseSitemap(xmlData []byte) (*URLSet, error) {
 	}
 	return &urlSet, nil
 }
+
+// FilterURLsBySinceDate filters URLs based on their lastmod date
+func (b *BaseScraper) FilterURLsBySinceDate(urls []URL, sinceDate *time.Time) []URL {
+	if sinceDate == nil {
+		return urls // No filtering if no date provided
+	}
+
+	var filteredURLs []URL
+	for _, url := range urls {
+		if url.LastMod == "" {
+			// If no lastmod date, include the URL (assume it might be recent)
+			filteredURLs = append(filteredURLs, url)
+			continue
+		}
+
+		// Parse the lastmod date (ISO 8601 format)
+		lastModTime, err := time.Parse(time.RFC3339, url.LastMod)
+		if err != nil {
+			// If we can't parse the date, include the URL to be safe
+			filteredURLs = append(filteredURLs, url)
+			continue
+		}
+
+		// Include URL if it was modified after the since date
+		if lastModTime.After(*sinceDate) {
+			filteredURLs = append(filteredURLs, url)
+		}
+	}
+
+	return filteredURLs
+}

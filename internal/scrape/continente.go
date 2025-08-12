@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"price-scraper/internal/config"
 	"price-scraper/internal/storage"
@@ -97,7 +98,16 @@ func (c *ContinenteScraper) ScrapeProductsWithCallbackAndConfig(callback Product
 	for i, sitemap := range productSitemaps {
 		fmt.Printf("Processing sitemap %d/%d: %s\n", i+1, len(productSitemaps), sitemap.Loc)
 
-		sitemapProductCount, err := c.processSitemapWithCallbackAndConfig(sitemap.Loc, callback, maxProductsPerSitemap)
+		var sitemapProductCount int
+		var err error
+
+		// Use date filtering if sinceDate is provided in config
+		if cfg != nil && cfg.SinceDate != nil {
+			sitemapProductCount, err = c.processSitemapWithCallbackAndConfigWithDateFilter(sitemap.Loc, callback, maxProductsPerSitemap, cfg.SinceDate)
+		} else {
+			sitemapProductCount, err = c.processSitemapWithCallbackAndConfig(sitemap.Loc, callback, maxProductsPerSitemap)
+		}
+
 		if err != nil {
 			fmt.Printf("Warning: failed to process sitemap %s: %v\n", sitemap.Loc, err)
 			continue
@@ -604,6 +614,55 @@ func (c *ContinenteScraper) processSitemapWithCallbackAndConfig(sitemapURL strin
 	return productCount, nil
 }
 
+// processSitemapWithCallbackAndConfigWithDateFilter processes a single product sitemap with configuration limits and date filtering
+func (c *ContinenteScraper) processSitemapWithCallbackAndConfigWithDateFilter(sitemapURL string, callback ProductCallback, maxProductsPerSitemap int, sinceDate *time.Time) (int, error) {
+	// Fetch sitemap XML
+	xmlData, err := c.FetchXML(sitemapURL)
+	if err != nil {
+		return 0, fmt.Errorf("failed to fetch sitemap: %w", err)
+	}
+
+	// Parse sitemap
+	urlSet, err := c.ParseSitemap(xmlData)
+	if err != nil {
+		return 0, fmt.Errorf("failed to parse sitemap: %w", err)
+	}
+
+	fmt.Printf("Found %d product URLs in sitemap\n", len(urlSet.URLs))
+
+	// Apply date filtering
+	filteredURLs := c.FilterURLsBySinceDate(urlSet.URLs, sinceDate)
+	if sinceDate != nil {
+		fmt.Printf("After date filtering (since %s): %d URLs remain\n", sinceDate.Format("2006-01-02"), len(filteredURLs))
+	}
+
+	// Apply per-sitemap limit
+	maxProducts := len(filteredURLs)
+	if maxProductsPerSitemap > 0 && maxProducts > maxProductsPerSitemap {
+		maxProducts = maxProductsPerSitemap
+	}
+
+	productCount := 0
+	for i := 0; i < maxProducts; i++ {
+		urlEntry := filteredURLs[i]
+
+		product, err := c.scrapeProductPage(urlEntry.Loc)
+		if err != nil {
+			fmt.Printf("Warning: failed to scrape product %s: %v\n", urlEntry.Loc, err)
+			continue
+		}
+
+		if product != nil {
+			if err := callback(product); err != nil {
+				return productCount, fmt.Errorf("callback failed for product %s: %w", product.Name, err)
+			}
+			productCount++
+		}
+	}
+
+	return productCount, nil
+}
+
 // ScrapeProductsParallel implements parallel scraping for Continente
 func (c *ContinenteScraper) ScrapeProductsParallel(cfg *config.Config, storage storage.Storage, limiter *rate.Limiter) error {
 	ctx := context.Background()
@@ -689,13 +748,21 @@ func (c *ContinenteScraper) processSitemapParallel(ctx context.Context, sitemapU
 		return 0, fmt.Errorf("failed to parse sitemap: %w", err)
 	}
 
+	fmt.Printf("Found %d product URLs in sitemap\n", len(urlSet.URLs))
+
+	// Apply date filtering
+	filteredURLs := c.FilterURLsBySinceDate(urlSet.URLs, cfg.SinceDate)
+	if cfg.SinceDate != nil {
+		fmt.Printf("After date filtering (since %s): %d URLs remain\n", cfg.SinceDate.Format("2006-01-02"), len(filteredURLs))
+	}
+
 	// Apply per-sitemap limit
-	maxProducts := len(urlSet.URLs)
+	maxProducts := len(filteredURLs)
 	if cfg.MaxProductsPerSitemap > 0 && maxProducts > cfg.MaxProductsPerSitemap {
 		maxProducts = cfg.MaxProductsPerSitemap
 	}
 
-	fmt.Printf("Processing %d product URLs from sitemap (limited from %d)\n", maxProducts, len(urlSet.URLs))
+	fmt.Printf("Processing %d product URLs from sitemap (limited from %d)\n", maxProducts, len(filteredURLs))
 
 	var productCount int64
 	var wg sync.WaitGroup
@@ -708,7 +775,7 @@ func (c *ContinenteScraper) processSitemapParallel(ctx context.Context, sitemapU
 		}
 
 		// Create a closure to capture the URL
-		productURL := urlSet.URLs[i].Loc
+		productURL := filteredURLs[i].Loc
 		wg.Add(1)
 
 		// Submit job to worker pool
