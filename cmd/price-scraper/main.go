@@ -18,7 +18,7 @@ func main() {
 		log.Fatalf("Failed to load configuration: %v", err)
 	}
 
-	store, err := storage.NewSQLiteStorage(cfg.DatabasePath)
+	store, err := storage.NewStorage(cfg.DatabaseType, cfg.DatabaseConnectionString)
 	if err != nil {
 		log.Fatalf("Failed to initialize storage: %v", err)
 	}
@@ -38,6 +38,7 @@ func main() {
 		fmt.Println("Options:")
 		fmt.Println("  --since=YYYY-MM-DD  Only scrape products modified after this date")
 		fmt.Printf("\nConfiguration (via environment variables):\n")
+		fmt.Printf("  PRICE_SCRAPER_DB_TYPE=%s (database type: sqlite or postgres)\n", cfg.DatabaseType)
 		fmt.Printf("  PRICE_SCRAPER_MAX_WORKERS=%d (parallel workers)\n", cfg.MaxConcurrentWorkers)
 		fmt.Printf("  PRICE_SCRAPER_MAX_SITEMAPS=%d (max sitemaps, -1=unlimited)\n", cfg.MaxSitemaps)
 		fmt.Printf("  PRICE_SCRAPER_MAX_PRODUCTS_TOTAL=%d (max total products, -1=unlimited)\n", cfg.MaxProductsTotal)

@@ -192,7 +192,9 @@ cp example.env .env
 
 | Variable | Default | Description |
 |----------|---------|-------------|
+| `PRICE_SCRAPER_DB_TYPE` | `sqlite` | Database type: `sqlite` or `postgres` |
 | `PRICE_SCRAPER_DB_PATH` | `~/.price-scraper/prices.db` | SQLite database path |
+| `PRICE_SCRAPER_DB_CONNECTION_STRING` | (auto) | Database connection string |
 | `PRICE_SCRAPER_USER_AGENT` | Chrome UA | HTTP User-Agent string |
 | `PRICE_SCRAPER_HTTP_TIMEOUT` | `30s` | HTTP request timeout |
 | `PRICE_SCRAPER_MAX_WORKERS` | `5` | Number of parallel workers |
@@ -201,6 +203,34 @@ cp example.env .env
 | `PRICE_SCRAPER_MAX_SITEMAPS` | `-1` | Max sitemaps to process (-1 = unlimited) |
 | `PRICE_SCRAPER_MAX_PRODUCTS_TOTAL` | `-1` | Max total products (-1 = unlimited) |
 | `PRICE_SCRAPER_MAX_PRODUCTS_PER_SITEMAP` | `100` | Max products per sitemap |
+
+#### Database Configuration
+
+The scraper supports both SQLite and PostgreSQL databases:
+
+**SQLite (Default):**
+```bash
+export PRICE_SCRAPER_DB_TYPE=sqlite
+export PRICE_SCRAPER_DB_PATH=/path/to/your/prices.db
+```
+
+**PostgreSQL:**
+```bash
+export PRICE_SCRAPER_DB_TYPE=postgres
+export PRICE_SCRAPER_DB_CONNECTION_STRING="host=localhost port=5432 user=postgres password=yourpassword dbname=price_scraper sslmode=disable"
+```
+
+**PostgreSQL Setup:**
+```sql
+-- Create database
+CREATE DATABASE price_scraper;
+
+-- Create user (optional)
+CREATE USER scraper_user WITH PASSWORD 'yourpassword';
+GRANT ALL PRIVILEGES ON DATABASE price_scraper TO scraper_user;
+```
+
+The application will automatically create the necessary tables on first run.
 
 #### Example Configurations
 
@@ -235,7 +265,7 @@ export PRICE_SCRAPER_MAX_PRODUCTS_PER_SITEMAP=25
 - **BaseScraper**: Common functionality for all scrapers (HTTP, parsing, rate limiting)
 - **Individual Scrapers**: Store-specific implementations
 - **WorkerPool**: Manages parallel workers with rate limiting
-- **Storage**: SQLite-based product storage
+- **Storage**: Database abstraction layer supporting SQLite and PostgreSQL
 
 ### Parallel Processing
 
@@ -356,7 +386,13 @@ go build -o price-scraper main.go
 
 ## Changelog
 
-### v2.0.0 (Current)
+### v2.1.0 (Current)
+- Added PostgreSQL database support
+- Enhanced database abstraction layer
+- Updated configuration system for database selection
+- Improved documentation with database setup instructions
+
+### v2.0.0
 - Added parallel processing with worker pools
 - Implemented configurable rate limiting
 - Added comprehensive configuration system

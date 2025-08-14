@@ -9,8 +9,12 @@ import (
 
 // Config holds the application configuration
 type Config struct {
-	DatabasePath string
-	UserAgent    string
+	// Database configuration
+	DatabaseType             string // "sqlite" or "postgres"
+	DatabasePath             string // for SQLite: file path
+	DatabaseConnectionString string // for PostgreSQL: connection string
+
+	UserAgent string
 
 	// Scraping performance settings
 	RequestDelay         time.Duration // delay between requests
@@ -38,14 +42,32 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 
+	// Database configuration
+	dbType := os.Getenv("PRICE_SCRAPER_DB_TYPE")
+	if dbType == "" {
+		dbType = "sqlite" // default to SQLite
+	}
+
 	dbPath := os.Getenv("PRICE_SCRAPER_DB_PATH")
 	if dbPath == "" {
 		dbPath = filepath.Join(homeDir, ".price-scraper", "prices.db")
 	}
 
-	// Ensure the directory exists
-	if err := os.MkdirAll(filepath.Dir(dbPath), 0755); err != nil {
-		return nil, err
+	// For SQLite, ensure the directory exists
+	if dbType == "sqlite" || dbType == "sqlite3" {
+		if err := os.MkdirAll(filepath.Dir(dbPath), 0755); err != nil {
+			return nil, err
+		}
+	}
+
+	dbConnectionString := os.Getenv("PRICE_SCRAPER_DB_CONNECTION_STRING")
+	// If no connection string is provided, use the appropriate default
+	if dbConnectionString == "" {
+		if dbType == "postgres" || dbType == "postgresql" {
+			dbConnectionString = "host=localhost port=5432 user=postgres dbname=price_scraper sslmode=disable"
+		} else {
+			dbConnectionString = dbPath // for SQLite, connection string is the file path
+		}
 	}
 
 	userAgent := os.Getenv("PRICE_SCRAPER_USER_AGENT")
@@ -63,15 +85,17 @@ func Load() (*Config, error) {
 	requestsPerSecond := parseEnvFloat("PRICE_SCRAPER_REQUESTS_PER_SECOND", 2.0)
 
 	return &Config{
-		DatabasePath:          dbPath,
-		UserAgent:             userAgent,
-		RequestDelay:          requestDelay,
-		MaxConcurrentWorkers:  maxWorkers,
-		MaxSitemaps:           maxSitemaps,
-		MaxProductsTotal:      maxProductsTotal,
-		MaxProductsPerSitemap: maxProductsPerSitemap,
-		HTTPTimeout:           httpTimeout,
-		RequestsPerSecond:     requestsPerSecond,
+		DatabaseType:             dbType,
+		DatabasePath:             dbPath,
+		DatabaseConnectionString: dbConnectionString,
+		UserAgent:                userAgent,
+		RequestDelay:             requestDelay,
+		MaxConcurrentWorkers:     maxWorkers,
+		MaxSitemaps:              maxSitemaps,
+		MaxProductsTotal:         maxProductsTotal,
+		MaxProductsPerSitemap:    maxProductsPerSitemap,
+		HTTPTimeout:              httpTimeout,
+		RequestsPerSecond:        requestsPerSecond,
 	}, nil
 }
 
