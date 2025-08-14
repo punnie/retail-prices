@@ -17,7 +17,7 @@ pkgs.buildGoModule rec {
       !(pkgs.lib.hasSuffix "test_streaming.go" baseName);
   };
   
-  vendorHash = "sha256-GPYi14995zphM1mLmbjTRoMHZGdGjKOjVTdIkRHIQLc=";
+  vendorHash = "sha256-Yy+y3nikS9majeaEsuUHDTSpcW5H0mhntVfUI3yBnYU=";
   
   # Build flags
   ldflags = [
