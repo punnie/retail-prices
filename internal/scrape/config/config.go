@@ -25,6 +25,10 @@ type Config struct {
 	MaxProductsTotal      int // maximum total products to scrape (-1 for unlimited)
 	MaxProductsPerSitemap int // maximum products per sitemap (-1 for unlimited)
 
+	// Sequential page sizing limits
+	PageSize          int // page size for sequential loads
+	PageDiscoverySize int // number of pages to discover
+
 	// Timeouts
 	HTTPTimeout time.Duration // HTTP client timeout
 
@@ -83,6 +87,8 @@ func Load() (*Config, error) {
 	maxProductsPerSitemap := parseEnvInt("PRICE_SCRAPER_MAX_PRODUCTS_PER_SITEMAP", 100)
 	httpTimeout := parseEnvDuration("PRICE_SCRAPER_HTTP_TIMEOUT", 30*time.Second)
 	requestsPerSecond := parseEnvFloat("PRICE_SCRAPER_REQUESTS_PER_SECOND", 2.0)
+	pageSize := parseEnvInt("PRICE_SCRAPER_PAGE_SIZE", 200)
+	pageDiscoverySize := parseEnvInt("PRICE_SCRAPER_PAGE_DISCOVERY_SIZE", 1000)
 
 	return &Config{
 		DatabaseType:             dbType,
@@ -94,6 +100,8 @@ func Load() (*Config, error) {
 		MaxSitemaps:              maxSitemaps,
 		MaxProductsTotal:         maxProductsTotal,
 		MaxProductsPerSitemap:    maxProductsPerSitemap,
+		PageSize:                 pageSize,
+		PageDiscoverySize:        pageDiscoverySize,
 		HTTPTimeout:              httpTimeout,
 		RequestsPerSecond:        requestsPerSecond,
 	}, nil

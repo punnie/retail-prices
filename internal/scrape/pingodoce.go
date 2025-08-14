@@ -75,7 +75,7 @@ func (p *PingoDoceScraper) ScrapeProductsWithCallback(callback ProductCallback) 
 func (p *PingoDoceScraper) ScrapeProductsWithCallbackAndConfig(callback ProductCallback, cfg *config.Config) error {
 	// Use default limits if no config provided
 	maxProductsTotal := -1 // No limit by default for Pingo Doce (API-based)
-	pageSize := 200
+	pageSize := 20
 
 	if cfg != nil {
 		maxProductsTotal = cfg.MaxProductsTotal
@@ -297,7 +297,7 @@ func (p *PingoDoceScraper) ScrapeProductsParallel(cfg *config.Config, storage st
 	fmt.Printf("Starting to scrape Pingo Doce products using API endpoint (parallel mode with %d workers)\n", cfg.MaxConcurrentWorkers)
 
 	// First, determine how many pages we need to fetch
-	pageSize := 20
+	pageSize := cfg.PageSize
 	if cfg.MaxProductsPerSitemap > 0 && cfg.MaxProductsPerSitemap < 100 {
 		pageSize = cfg.MaxProductsPerSitemap
 	}
@@ -357,8 +357,8 @@ func (p *PingoDoceScraper) ScrapeProductsParallel(cfg *config.Config, storage st
 		start += pageSize
 
 		// Limit page discovery to prevent runaway
-		if len(pageJobs) >= 100 {
-			fmt.Printf("Reached page discovery limit of 100 pages\n")
+		if len(pageJobs) >= cfg.PageDiscoverySize {
+			fmt.Printf("Reached page discovery limit of %d pages\n", cfg.PageDiscoverySize)
 			break
 		}
 	}
