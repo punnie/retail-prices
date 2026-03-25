@@ -79,6 +79,11 @@ func (b *BaseScraper) FetchPage(url string) (*goquery.Document, error) {
 	}
 	defer resp.Body.Close()
 
+	// Detect redirects: if the final URL differs from the requested URL, the page doesn't exist
+	if finalURL := resp.Request.URL.String(); finalURL != url {
+		return nil, fmt.Errorf("page redirected from %s to %s", url, finalURL)
+	}
+
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("HTTP error: %d", resp.StatusCode)
 	}
@@ -264,6 +269,11 @@ func (b *BaseScraper) FetchPageWithRateLimit(ctx context.Context, url string, li
 		return nil, err
 	}
 	defer resp.Body.Close()
+
+	// Detect redirects: if the final URL differs from the requested URL, the page doesn't exist
+	if finalURL := resp.Request.URL.String(); finalURL != url {
+		return nil, fmt.Errorf("page redirected from %s to %s", url, finalURL)
+	}
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("HTTP error: %d", resp.StatusCode)
