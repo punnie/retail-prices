@@ -12,21 +12,14 @@ import (
 	"golang.org/x/time/rate"
 )
 
-// ProductCallback is a function type for handling products as they are scraped
-type ProductCallback func(*storage.Product) error
-
 // Scraper interface defines the methods that each store scraper must implement
 type Scraper interface {
 	// GetName returns the name of the store
 	GetName() string
 
-	// ScrapeProducts scrapes products from the store using seed URLs/sitemaps
-	// Deprecated: Use ScrapeProductsWithCallback for streaming storage
-	ScrapeProducts() ([]*storage.Product, error)
-
-	// ScrapeProductsWithCallback scrapes products from the store and calls the callback for each product
-	// This allows for streaming storage and reduces memory usage
-	ScrapeProductsWithCallback(callback ProductCallback) error
+	// ScrapeProducts scrapes products from the store using parallel workers,
+	// saving results to storage as they are scraped.
+	ScrapeProducts(cfg *config.Config, storage storage.Storage, limiter *rate.Limiter) error
 
 	// SetHTTPClient allows setting a custom HTTP client
 	SetHTTPClient(client *http.Client)
@@ -47,7 +40,6 @@ func NewManager(storage storage.Storage, cfg *config.Config) *Manager {
 		Timeout: cfg.HTTPTimeout,
 	}
 
-	// Create rate limiter
 	limiter := rate.NewLimiter(rate.Limit(cfg.RequestsPerSecond), 1)
 
 	return &Manager{
@@ -65,83 +57,20 @@ func (m *Manager) RegisterScraper(name string, scraper Scraper) {
 	m.scrapers[name] = scraper
 }
 
-// ScrapeStore scrapes a specific store and saves the results
-// Deprecated: Use ScrapeStoreStreaming for better memory usage and crash resilience
+// ScrapeStore scrapes a specific store using parallel workers
 func (m *Manager) ScrapeStore(storeName string) error {
 	scraper, exists := m.scrapers[storeName]
 	if !exists {
 		return fmt.Errorf("scraper for store '%s' not found", storeName)
 	}
 
-	fmt.Printf("Starting to scrape %s...\n", scraper.GetName())
+	fmt.Printf("Starting to scrape %s (parallel mode with %d workers)...\n",
+		scraper.GetName(), m.config.MaxConcurrentWorkers)
 
-	products, err := scraper.ScrapeProducts()
-	if err != nil {
-		return fmt.Errorf("failed to scrape %s: %w", scraper.GetName(), err)
-	}
-
-	fmt.Printf("Found %d products from %s\n", len(products), scraper.GetName())
-
-	// Save products to storage
-	for _, product := range products {
-		if err := m.storage.SaveProduct(product); err != nil {
-			fmt.Printf("Warning: failed to save product %s: %v\n", product.Name, err)
-		}
-	}
-
-	return nil
-}
-
-// ScrapeStoreStreaming scrapes a specific store and saves results as they are scraped
-func (m *Manager) ScrapeStoreStreaming(storeName string) error {
-	scraper, exists := m.scrapers[storeName]
-	if !exists {
-		return fmt.Errorf("scraper for store '%s' not found", storeName)
-	}
-
-	fmt.Printf("Starting to scrape %s (streaming mode)...\n", scraper.GetName())
-
-	productCount := 0
-	callback := func(product *storage.Product) error {
-		if err := m.storage.SaveProduct(product); err != nil {
-			fmt.Printf("Warning: failed to save product %s: %v\n", product.Name, err)
-			return err
-		}
-		productCount++
-		if productCount%10 == 0 {
-			fmt.Printf("Saved %d products from %s...\n", productCount, scraper.GetName())
-		}
-		return nil
-	}
-
-	// Check if scraper supports configuration
-	if configScraper, ok := scraper.(ConfigurableScraper); ok {
-		err := configScraper.ScrapeProductsWithCallbackAndConfig(callback, m.config)
-		if err != nil {
-			return fmt.Errorf("failed to scrape %s: %w", scraper.GetName(), err)
-		}
-	} else {
-		err := scraper.ScrapeProductsWithCallback(callback)
-		if err != nil {
-			return fmt.Errorf("failed to scrape %s: %w", scraper.GetName(), err)
-		}
-	}
-
-	fmt.Printf("Successfully scraped and saved %d products from %s\n", productCount, scraper.GetName())
-	return nil
-}
-
-// GetAvailableStores returns a list of available store names
-func (m *Manager) GetAvailableStores() []string {
-	stores := make([]string, 0, len(m.scrapers))
-	for name := range m.scrapers {
-		stores = append(stores, name)
-	}
-	return stores
+	return scraper.ScrapeProducts(m.config, m.storage, m.limiter)
 }
 
 // ScrapeAllStores scrapes all registered stores
-// Deprecated: Use ScrapeAllStoresStreaming for better memory usage and crash resilience
 func (m *Manager) ScrapeAllStores() error {
 	for storeName := range m.scrapers {
 		if err := m.ScrapeStore(storeName); err != nil {
@@ -152,47 +81,13 @@ func (m *Manager) ScrapeAllStores() error {
 	return nil
 }
 
-// ScrapeAllStoresStreaming scrapes all registered stores using streaming storage
-func (m *Manager) ScrapeAllStoresStreaming() error {
-	for storeName := range m.scrapers {
-		if err := m.ScrapeStoreStreaming(storeName); err != nil {
-			fmt.Printf("Error scraping %s: %v\n", storeName, err)
-			continue
-		}
+// GetAvailableStores returns a list of available store names
+func (m *Manager) GetAvailableStores() []string {
+	stores := make([]string, 0, len(m.scrapers))
+	for name := range m.scrapers {
+		stores = append(stores, name)
 	}
-	return nil
-}
-
-// ScrapeStoreParallel scrapes a specific store using parallel workers
-func (m *Manager) ScrapeStoreParallel(storeName string) error {
-	scraper, exists := m.scrapers[storeName]
-	if !exists {
-		return fmt.Errorf("scraper for store '%s' not found", storeName)
-	}
-
-	// Check if scraper supports parallel scraping
-	if parallelScraper, ok := scraper.(ParallelScraper); ok {
-		fmt.Printf("Starting to scrape %s (parallel mode with %d workers)...\n",
-			scraper.GetName(), m.config.MaxConcurrentWorkers)
-
-		return parallelScraper.ScrapeProductsParallel(m.config, m.storage, m.limiter)
-	}
-
-	// Fallback to streaming mode
-	fmt.Printf("Scraper %s doesn't support parallel mode, falling back to streaming...\n", scraper.GetName())
-	return m.ScrapeStoreStreaming(storeName)
-}
-
-// ConfigurableScraper interface for scrapers that support configuration
-type ConfigurableScraper interface {
-	Scraper
-	ScrapeProductsWithCallbackAndConfig(callback ProductCallback, cfg *config.Config) error
-}
-
-// ParallelScraper interface for scrapers that support parallel processing
-type ParallelScraper interface {
-	Scraper
-	ScrapeProductsParallel(cfg *config.Config, storage storage.Storage, limiter *rate.Limiter) error
+	return stores
 }
 
 // WorkerPool manages a pool of workers for parallel scraping
@@ -213,29 +108,26 @@ func NewWorkerPool(workers int, limiter *rate.Limiter) *WorkerPool {
 
 	return &WorkerPool{
 		workers:   workers,
-		jobs:      make(chan func() error, workers*10), // Larger buffer for jobs
+		jobs:      make(chan func() error, workers*10),
 		ctx:       ctx,
 		cancel:    cancel,
 		limiter:   limiter,
-		errorChan: make(chan error, workers*10), // Buffer for errors
+		errorChan: make(chan error, workers*10),
 	}
 }
 
 // Start starts the worker pool
 func (wp *WorkerPool) Start() {
-	// Start error handler goroutine
 	wp.errorWg.Add(1)
 	go func() {
 		defer wp.errorWg.Done()
 		for err := range wp.errorChan {
 			if err != nil {
-				// Just log the error, don't block
 				fmt.Printf("Worker error: %v\n", err)
 			}
 		}
 	}()
 
-	// Start workers
 	for i := 0; i < wp.workers; i++ {
 		wp.wg.Add(1)
 		go wp.worker(i)
@@ -253,13 +145,10 @@ func (wp *WorkerPool) worker(id int) {
 				return
 			}
 
-			// Execute the job (rate limiting is handled inside the job function)
 			if err := job(); err != nil {
-				// Send error to error channel in non-blocking way
 				select {
 				case wp.errorChan <- err:
 				default:
-					// If error channel is full, just log and continue
 					fmt.Printf("Worker %d: error channel full, dropping error: %v\n", id, err)
 				}
 			}

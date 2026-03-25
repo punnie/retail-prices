@@ -17,8 +17,7 @@ type Config struct {
 	UserAgent string
 
 	// Scraping performance settings
-	RequestDelay         time.Duration // delay between requests
-	MaxConcurrentWorkers int           // number of parallel workers
+	MaxConcurrentWorkers int // number of parallel workers
 
 	// Limits
 	MaxSitemaps           int // maximum number of sitemaps to process (-1 for unlimited)
@@ -80,7 +79,6 @@ func Load() (*Config, error) {
 	}
 
 	// Parse performance settings
-	requestDelay := parseEnvDuration("PRICE_SCRAPER_REQUEST_DELAY", 500*time.Millisecond)
 	maxWorkers := parseEnvInt("PRICE_SCRAPER_MAX_WORKERS", 5)
 	maxSitemaps := parseEnvInt("PRICE_SCRAPER_MAX_SITEMAPS", -1)            // unlimited by default
 	maxProductsTotal := parseEnvInt("PRICE_SCRAPER_MAX_PRODUCTS_TOTAL", -1) // unlimited by default
@@ -95,7 +93,6 @@ func Load() (*Config, error) {
 		DatabasePath:             dbPath,
 		DatabaseConnectionString: dbConnectionString,
 		UserAgent:                userAgent,
-		RequestDelay:             requestDelay,
 		MaxConcurrentWorkers:     maxWorkers,
 		MaxSitemaps:              maxSitemaps,
 		MaxProductsTotal:         maxProductsTotal,
