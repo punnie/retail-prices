@@ -1,6 +1,6 @@
 # Portuguese Food Retailers Price Scraper
 
-A high-performance web scraper for Portuguese online food retailers including Continente, Pingo Doce, and Auchan.
+A high-performance web scraper for Portuguese online food retailers including Continente, Pingo Doce, Auchan, and Celeiro.
 
 ## Features
 
@@ -16,6 +16,7 @@ A high-performance web scraper for Portuguese online food retailers including Co
 - **Continente** (`continente`) — Sitemap-based scraping
 - **Pingo Doce** (`pingodoce`) — API-based scraping
 - **Auchan** (`auchan`) — Sitemap-based scraping
+- **Celeiro** (`celeiro`) — Sitemap-based scraping
 
 ## Installation
 
@@ -154,6 +155,9 @@ go build -o price-scraper main.go
 
 # Scrape Auchan
 ./price-scraper auchan
+
+# Scrape Celeiro
+./price-scraper celeiro
 
 # Only scrape products modified after a specific date
 ./price-scraper continente --since=2025-01-01

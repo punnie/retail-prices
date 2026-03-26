@@ -30,10 +30,11 @@ func main() {
 	scraperManager.RegisterScraper("continente", scraper.NewContinenteScraper())
 	scraperManager.RegisterScraper("pingodoce", scraper.NewPingoDoceScraper())
 	scraperManager.RegisterScraper("auchan", scraper.NewAuchanScraper())
+	scraperManager.RegisterScraper("celeiro", scraper.NewCeleiroScraper())
 
 	if len(os.Args) < 2 {
 		fmt.Println("Usage: price-scraper <store_name> [--since=YYYY-MM-DD]")
-		fmt.Println("Available stores: continente, pingodoce, auchan")
+		fmt.Println("Available stores: continente, pingodoce, auchan, celeiro")
 		fmt.Println("Options:")
 		fmt.Println("  --since=YYYY-MM-DD  Only scrape products modified after this date")
 		fmt.Printf("\nConfiguration (via environment variables):\n")
