@@ -1,0 +1,20 @@
+# Local Postgres cluster (see flake.nix)
+.pgdata/
+.pgrun/
+
+# Source data dumps — large, not ours to redistribute
+*.dump
+
+# Build artifacts
+/result
+/retail
+cmd/retail/retail
+
+# Generated output
+profile_report.md
+report.html
+cmd/retail/report.html
+
+# Tooling / OS
+.direnv/
+.DS_Store

@@ -1,0 +1,6 @@
+For the last year I've been scraping retail product prices from 4 big retailers here in Portugal. There are 4 csv files in this directory with a sample for each one of the 4. This is all the data we have available. I'd like to start doing something useful with this data, let's start with your take on some different use cases:
+- A periodic report on price changes on products on any retailer (promotions, for example). This looks easy but the data is very dirty, and we will find drastic price changes (e.g. from 0.99 to 1000.00) due to internal processes of the retailers and maybe scraping unpublished products that appear to show in the Sitemap.
+- Cross-reference the same product across retailers so that we can price compare. There's no unified ID between both, so this is harder than it looks. I'm not expecting the solution for this to be completely automated, but I'd appreciate some tooling to establish those connections in an easier manner.
+- Have a list of products (a common shopping list) and see how cost evolves over time in all of the retailers. In fact, be able to establish a shopping list and compare it among retailers or find a nice grouping of items that minimises cost.
+
+Ask any clarifying questions you may have.
