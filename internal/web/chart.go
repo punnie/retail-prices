@@ -3,6 +3,7 @@ package web
 import (
 	"fmt"
 	"html/template"
+	"math"
 	"strings"
 	"time"
 
@@ -17,7 +18,7 @@ import (
 // alone.
 const (
 	chartW, chartH                             = 760.0, 260.0
-	chartPadL, chartPadR, chartPadT, chartPadB = 46.0, 92.0, 16.0, 28.0
+	chartPadL, chartPadR, chartPadT, chartPadB = 58.0, 92.0, 16.0, 46.0
 )
 
 type chartPoint struct {
@@ -84,6 +85,9 @@ func renderChart(observed []chartPoint, spells []pricing.Spell, changes []pricin
 	}
 	minP -= span * 0.08
 	maxP += span * 0.08
+	if minP < 0 {
+		minP = 0
+	}
 
 	innerW := chartW - chartPadL - chartPadR
 	innerH := chartH - chartPadT - chartPadB
@@ -98,6 +102,24 @@ func renderChart(observed []chartPoint, spells []pricing.Spell, changes []pricin
 	var b strings.Builder
 	fmt.Fprintf(&b, `<svg viewBox="0 0 %g %g" width="100%%" height="auto" role="img" aria-label="Price history chart" class="price-chart">`, chartW, chartH)
 	fmt.Fprintf(&b, `<rect x="0" y="0" width="%g" height="%g" fill="#fcfcfb" />`, chartW, chartH)
+
+	// Axes sit behind the data: light horizontal gridlines at each price
+	// tick, small vertical ticks per time label.
+	const gridInk, axisInk, tickInk = "#e4e3de", "#898781", "#52514e"
+	for _, p := range niceTicks(minP, maxP, 5) {
+		yy := y(p)
+		fmt.Fprintf(&b, `<line x1="%.1f" y1="%.1f" x2="%.1f" y2="%.1f" stroke="%s" stroke-width="1" />`, chartPadL, yy, chartPadL+innerW, yy, gridInk)
+		fmt.Fprintf(&b, `<text x="%.1f" y="%.1f" font-size="10" fill="%s" text-anchor="end">%s</text>`, chartPadL-6, yy+3, tickInk, formatTickPrice(p))
+	}
+	for _, t := range timeTicks(minT, maxT) {
+		xx := x(t.At)
+		fmt.Fprintf(&b, `<line x1="%.1f" y1="%.1f" x2="%.1f" y2="%.1f" stroke="%s" stroke-width="1" />`, xx, chartPadT+innerH, xx, chartPadT+innerH+4, axisInk)
+		fmt.Fprintf(&b, `<text x="%.1f" y="%.1f" font-size="10" fill="%s" text-anchor="middle">%s</text>`, xx, chartPadT+innerH+16, tickInk, t.Label)
+	}
+	fmt.Fprintf(&b, `<line x1="%.1f" y1="%.1f" x2="%.1f" y2="%.1f" stroke="%s" stroke-width="1" />`, chartPadL, chartPadT, chartPadL, chartPadT+innerH, axisInk)
+	fmt.Fprintf(&b, `<line x1="%.1f" y1="%.1f" x2="%.1f" y2="%.1f" stroke="%s" stroke-width="1" />`, chartPadL, chartPadT+innerH, chartPadL+innerW, chartPadT+innerH, axisInk)
+	fmt.Fprintf(&b, `<text x="%.1f" y="%.1f" font-size="10" fill="%s" text-anchor="middle">Date</text>`, chartPadL+innerW/2, chartH-6, axisInk)
+	fmt.Fprintf(&b, `<text transform="translate(12 %.1f) rotate(-90)" font-size="10" fill="%s" text-anchor="middle">Price (€)</text>`, chartPadT+innerH/2, axisInk)
 
 	// Promo (good/green tint) and pending (warning/amber tint) bands, behind
 	// everything else.
@@ -158,8 +180,6 @@ func renderChart(observed []chartPoint, spells []pricing.Spell, changes []pricin
 		fmt.Fprintf(&b, `<circle cx="%.1f" cy="%.1f" r="3.5" fill="%s" stroke="#fcfcfb" stroke-width="1" />`, x(c.ChangeDate), y(c.NewPrice), color)
 	}
 
-	fmt.Fprintf(&b, `<text x="%.1f" y="%.1f" font-size="10" fill="#898781">%s</text>`, chartPadL, chartH-8, minT.Format("2006-01-02"))
-	fmt.Fprintf(&b, `<text x="%.1f" y="%.1f" font-size="10" fill="#898781" text-anchor="end">%s</text>`, chartPadL+innerW, chartH-8, maxT.Format("2006-01-02"))
 	b.WriteString(`</svg>`)
 
 	legend := `<div class="chart-legend">
@@ -172,4 +192,89 @@ func renderChart(observed []chartPoint, spells []pricing.Spell, changes []pricin
 	</div>`
 
 	return template.HTML(b.String() + legend)
+}
+
+// niceTicks returns about n round (1/2/5 x 10^k) values spanning [lo, hi].
+func niceTicks(lo, hi float64, n int) []float64 {
+	raw := (hi - lo) / float64(n)
+	if raw <= 0 {
+		return nil
+	}
+	mag := math.Pow(10, math.Floor(math.Log10(raw)))
+	step := mag
+	for _, m := range []float64{1, 2, 5, 10} {
+		step = m * mag
+		if raw <= step {
+			break
+		}
+	}
+	var out []float64
+	for v := math.Ceil(lo/step) * step; v <= hi+step*1e-9; v += step {
+		out = append(out, math.Round(v/step)*step)
+	}
+	return out
+}
+
+func formatTickPrice(p float64) string {
+	if p == math.Trunc(p) {
+		return fmt.Sprintf("€%.0f", p)
+	}
+	return fmt.Sprintf("€%.2f", p)
+}
+
+type timeTick struct {
+	At    time.Time
+	Label string
+}
+
+// timeTicks places labelled ticks on the first of the month at the coarsest
+// step (1, 2, 3, 6 or 12 months) that still gives at most ~8 labels. Labels
+// carry the year on January and on the first tick so the span is never
+// ambiguous.
+func timeTicks(minT, maxT time.Time) []timeTick {
+	if days := maxT.Sub(minT).Hours() / 24; days < 70 {
+		step := 7
+		if days < 21 {
+			step = 2
+		}
+		if days < 6 {
+			step = 1
+		}
+		var out []timeTick
+		t := time.Date(minT.Year(), minT.Month(), minT.Day(), 0, 0, 0, 0, minT.Location())
+		for ; !t.After(maxT); t = t.AddDate(0, 0, step) {
+			out = append(out, timeTick{t, t.Format("2 Jan")})
+		}
+		return out
+	}
+	months := (maxT.Year()-minT.Year())*12 + int(maxT.Month()-minT.Month())
+	step := 1
+	for _, st := range []int{1, 2, 3, 6, 12, 24} {
+		step = st
+		if months/st <= 8 {
+			break
+		}
+	}
+	loc := minT.Location()
+	t := time.Date(minT.Year(), minT.Month(), 1, 0, 0, 0, 0, loc)
+	if t.Before(minT) {
+		t = t.AddDate(0, 1, 0)
+	}
+	if step > 1 {
+		for (int(t.Month())-1)%step != 0 {
+			t = t.AddDate(0, 1, 0)
+		}
+	}
+	var out []timeTick
+	for ; !t.After(maxT); t = t.AddDate(0, step, 0) {
+		label := t.Format("Jan")
+		if t.Month() == time.January || len(out) == 0 {
+			label = t.Format("Jan 2006")
+		}
+		out = append(out, timeTick{t, label})
+	}
+	if len(out) == 0 {
+		out = append(out, timeTick{minT, minT.Format("2 Jan 2006")})
+	}
+	return out
 }
