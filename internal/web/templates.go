@@ -134,6 +134,15 @@ const styleBlock = `
   .manual-actions button { padding: 0.5rem 1.2rem; border-radius: 6px; border: 1px solid #0ca30c; background: #0ca30c; color: #fff; cursor: pointer; }
   .error { background: rgba(208,59,59,0.1); border-left: 3px solid #d03b3b; padding: 0.6rem 0.9rem; border-radius: 4px; margin: 1rem 0; }
   @media (max-width: 700px) { .manual { grid-template-columns: 1fr; } }
+  table.bulk td { vertical-align: middle; }
+  table.bulk tr.pair { cursor: pointer; }
+  table.bulk tr.pair:has(input[type=checkbox]:not(:checked)) { background: rgba(208,59,59,0.08); }
+  table.bulk tr.pair:has(input[type=checkbox]:not(:checked)) td.name { text-decoration: line-through; color: #898781; }
+  table.bulk .thumb { width: 40px; height: 40px; }
+  table.bulk input[type=checkbox] { width: 18px; height: 18px; }
+  .bulk-bar { position: sticky; bottom: 0; background: #f9f9f7; border-top: 1px solid #e4e3de; padding: 0.8rem 0; display: flex; gap: 1rem; align-items: center; }
+  .bulk-bar button.confirm { padding: 0.5rem 1.2rem; border-radius: 6px; border: 1px solid #0ca30c; background: #0ca30c; color: #fff; cursor: pointer; }
+  .notice { background: #eef1fb; border-left: 3px solid #2457c5; padding: 0.6rem 0.9rem; border-radius: 4px; margin: 1rem 0; }
 </style>`
 
 var tmpl = template.Must(template.New("web").Funcs(funcs).Parse(`
@@ -292,7 +301,7 @@ var productTmpl = template.Must(template.Must(tmpl.Clone()).Parse(`
 var matchTmpl = template.Must(template.Must(tmpl.Clone()).Parse(`
 {{define "content"}}
 <h1>Cross-retailer linking queue</h1>
-<p class="muted">Suggested pairs from name/brand/pack-size matching, ranked by score. Nothing links automatically &mdash; confirm or reject each one. Missing a pair? <a href="/match/manual">Link products manually</a>.</p>
+<p class="muted">Suggested pairs from name/brand/pack-size matching, ranked by score. Nothing links automatically &mdash; confirm or reject each one. Many high-scoring pairs? <a href="/match/bulk">Review them in bulk</a>. Missing a pair? <a href="/match/manual">Link products manually</a>.</p>
 {{if .Candidates}}
 {{range .Candidates}}
 <div class="candidate">
@@ -373,5 +382,55 @@ var manualTmpl = template.Must(template.Must(tmpl.Clone()).Parse(`
     <button type="submit" formmethod="post" formaction="/match/manual">Same product &mdash; link them</button>
   </div>
 </form>
+{{end}}
+`))
+
+var bulkTmpl = template.Must(template.Must(tmpl.Clone()).Parse(`
+{{define "content"}}
+<h1>Bulk review</h1>
+<p class="muted">Undecided pairs scoring at least {{printf "%.2f" .Min}} that also pass every safety check: same pack size on both sides, prices within 30% (regular prices where known), neither product in another undecided pair, and no clash with an existing group. Everything is ticked &mdash; <strong>untick the wrong ones</strong> and submit. Unticked pairs are recorded as rejected. Pairs that fail a check stay in the <a href="/match">one-at-a-time queue</a>.</p>
+<form class="search" method="get" action="/match/bulk">
+  <label>Min score <input type="text" name="min" value="{{.Min}}" size="4"></label>
+  <label>Page size <input type="text" name="size" value="{{.Size}}" size="4"></label>
+  <button type="submit">Reload</button>
+</form>
+{{if .Posted}}<div class="notice">Last page: {{.Matched}} linked, {{.Rejected}} rejected{{if .Failed}}, {{.Failed}} refused (left undecided){{end}}.</div>{{end}}
+{{if .Rows}}
+<form method="post" action="/match/bulk">
+<input type="hidden" name="min" value="{{.Min}}">
+<input type="hidden" name="size" value="{{.Size}}">
+<table class="bulk">
+<thead><tr><th></th><th>Score</th><th colspan="2">Left</th><th colspan="2">Right</th><th>Pack</th></tr></thead>
+<tbody>
+{{range .Rows}}
+<tr class="pair">
+  <td><input type="hidden" name="pair" value="{{.Left.ID}}-{{.Right.ID}}"><input type="checkbox" name="ok" value="{{.Left.ID}}-{{.Right.ID}}" checked></td>
+  <td>{{printf "%.2f" .Score}}</td>
+  <td>{{if .Left.ImageURL}}<img class="thumb" src="{{imgSrc .Left.ImageURL}}" alt="" loading="lazy">{{end}}</td>
+  <td class="name"><span class="store-tag">{{.Left.Store}}</span> <a href="/products/{{.Left.ID}}" target="_blank">{{.Left.Name}}</a>{{if .Left.Brand}} <span class="muted">&middot; {{.Left.Brand}}</span>{{end}}<br><span class="muted">{{if .Left.HasPrice}}{{moneyF .Left.Price}} &middot; {{end}}<a href="{{.Left.URL}}" target="_blank" rel="noopener">on {{.Left.Store}} &nearr;</a></span></td>
+  <td>{{if .Right.ImageURL}}<img class="thumb" src="{{imgSrc .Right.ImageURL}}" alt="" loading="lazy">{{end}}</td>
+  <td class="name"><span class="store-tag">{{.Right.Store}}</span> <a href="/products/{{.Right.ID}}" target="_blank">{{.Right.Name}}</a>{{if .Right.Brand}} <span class="muted">&middot; {{.Right.Brand}}</span>{{end}}<br><span class="muted">{{if .Right.HasPrice}}{{moneyF .Right.Price}} &middot; {{end}}<a href="{{.Right.URL}}" target="_blank" rel="noopener">on {{.Right.Store}} &nearr;</a></span></td>
+  <td>{{.Pack}}</td>
+</tr>
+{{end}}
+</tbody>
+</table>
+<div class="bulk-bar">
+  <button class="confirm" type="submit">Submit page: link ticked, reject unticked</button>
+  <span class="muted">{{len .Rows}} pairs on this page. Click a row to toggle it.</span>
+</div>
+</form>
+<script>
+document.querySelectorAll("tr.pair").forEach(function (tr) {
+  tr.addEventListener("click", function (e) {
+    if (e.target.closest("a") || e.target.type === "checkbox") return;
+    var cb = tr.querySelector("input[type=checkbox]");
+    cb.checked = !cb.checked;
+  });
+});
+</script>
+{{else}}
+<p class="empty">No undecided pairs at this score pass the bulk checks. Lower the min score, or use the <a href="/match">one-at-a-time queue</a>.</p>
+{{end}}
 {{end}}
 `))

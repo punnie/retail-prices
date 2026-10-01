@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 
@@ -384,4 +385,167 @@ func (s *server) renderManual(w http.ResponseWriter, v manualView, status int) {
 	if err := manualTmpl.ExecuteTemplate(w, "layout", v); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 	}
+}
+
+// bulkRow is one pair on the bulk review page.
+type bulkRow struct {
+	Score       float64
+	Left, Right matchSide
+	Pack        string
+}
+
+// bulkPriceTolerance is how far apart (as a ratio) the two sides' prices
+// may be for a pair to be bulk-eligible. Regular prices are compared where
+// known, so one retailer being mid-promo doesn't disqualify a pair.
+const bulkPriceTolerance = 1.3
+
+// loadBulkCandidates returns undecided candidates at or above minScore that
+// are safe to confirm in bulk, i.e. every one of:
+//   - pack size known on both sides and equal (names often omit the size, and
+//     both early high-score rejections were same-name, different-size pairs);
+//   - prices within bulkPriceTolerance of each other;
+//   - neither product appears in another undecided pair at this score (those
+//     need a real choice, so they stay in the one-at-a-time queue);
+//   - neither product's existing group already holds a listing from the other
+//     side's store.
+func loadBulkCandidates(ctx context.Context, pool *pgxpool.Pool, minScore float64, limit int) ([]bulkRow, error) {
+	rows, err := pool.Query(ctx, `
+		WITH pending AS (
+		    SELECT mc.left_product_id l, mc.right_product_id r, mc.score
+		    FROM match_candidates mc
+		    WHERE mc.score >= $1
+		      AND NOT EXISTS (SELECT 1 FROM match_decisions d
+		                      WHERE d.left_product_id = mc.left_product_id AND d.right_product_id = mc.right_product_id)
+		),
+		fanout AS (
+		    SELECT pid, count(*) n FROM (SELECT l pid FROM pending UNION ALL SELECT r FROM pending) x GROUP BY pid
+		)
+		SELECT p.score,
+		       a.id, a.store, a.name, coalesce(a.brand,''), coalesce(a.image_url,''), a.url, coalesce(pa.current_price,0), pa.current_price IS NOT NULL,
+		       b.id, b.store, b.name, coalesce(b.brand,''), coalesce(b.image_url,''), b.url, coalesce(pb.current_price,0), pb.current_price IS NOT NULL,
+		       trim(to_char(a.pack_value, 'FM999999990.##')) || ' ' || a.pack_unit
+		FROM pending p
+		JOIN retail_products a ON a.id = p.l
+		JOIN retail_products b ON b.id = p.r
+		JOIN fanout fa ON fa.pid = a.id
+		JOIN fanout fb ON fb.pid = b.id
+		JOIN product_pricing_snapshot pa ON pa.retail_product_id = a.id
+		JOIN product_pricing_snapshot pb ON pb.retail_product_id = b.id
+		WHERE fa.n = 1 AND fb.n = 1
+		  AND a.pack_value IS NOT NULL AND b.pack_value IS NOT NULL AND a.pack_unit = b.pack_unit
+		  AND abs(a.pack_value - b.pack_value) <= 0.005 * greatest(a.pack_value, b.pack_value)
+		  AND coalesce(pa.regular_price, pa.current_price) > 0 AND coalesce(pb.regular_price, pb.current_price) > 0
+		  AND greatest(coalesce(pa.regular_price, pa.current_price), coalesce(pb.regular_price, pb.current_price))
+		      <= $2 * least(coalesce(pa.regular_price, pa.current_price), coalesce(pb.regular_price, pb.current_price))
+		  AND NOT EXISTS (
+		      SELECT 1 FROM product_group_members me
+		      JOIN product_group_members o ON o.product_group_id = me.product_group_id AND o.retail_product_id <> me.retail_product_id
+		      JOIN retail_products orp ON orp.id = o.retail_product_id
+		      WHERE (me.retail_product_id = a.id AND orp.store = b.store)
+		         OR (me.retail_product_id = b.id AND orp.store = a.store))
+		ORDER BY p.score DESC, p.l, p.r
+		LIMIT $3`, minScore, bulkPriceTolerance, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []bulkRow
+	for rows.Next() {
+		var c bulkRow
+		if err := rows.Scan(&c.Score,
+			&c.Left.ID, &c.Left.Store, &c.Left.Name, &c.Left.Brand, &c.Left.ImageURL, &c.Left.URL, &c.Left.Price, &c.Left.HasPrice,
+			&c.Right.ID, &c.Right.Store, &c.Right.Name, &c.Right.Brand, &c.Right.ImageURL, &c.Right.URL, &c.Right.Price, &c.Right.HasPrice,
+			&c.Pack); err != nil {
+			return nil, err
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
+const (
+	bulkDefaultMin  = 0.9
+	bulkDefaultSize = 100
+	bulkMaxSize     = 500
+)
+
+type bulkView struct {
+	Title    string
+	Min      float64
+	Size     int
+	Rows     []bulkRow
+	Matched  int
+	Rejected int
+	Failed   int
+	Posted   bool
+}
+
+func (s *server) handleBulkReview(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	v := bulkView{Title: "Bulk review", Min: bulkDefaultMin, Size: bulkDefaultSize}
+	if f, err := strconv.ParseFloat(q.Get("min"), 64); err == nil && f > 0 && f <= 1 {
+		v.Min = f
+	}
+	if n, err := strconv.Atoi(q.Get("size")); err == nil && n > 0 {
+		v.Size = min(n, bulkMaxSize)
+	}
+	if q.Has("matched") {
+		v.Posted = true
+		v.Matched, _ = strconv.Atoi(q.Get("matched"))
+		v.Rejected, _ = strconv.Atoi(q.Get("rejected"))
+		v.Failed, _ = strconv.Atoi(q.Get("failed"))
+	}
+	rows, err := loadBulkCandidates(r.Context(), s.pool, v.Min, v.Size)
+	if err != nil {
+		httpError(w, err)
+		return
+	}
+	v.Rows = rows
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if err := bulkTmpl.ExecuteTemplate(w, "layout", v); err != nil {
+		httpError(w, err)
+	}
+}
+
+// handleBulkDecide records one decision per pair shown on the page: ticked
+// pairs ("ok") as matched, unticked ones as rejected. Each pair is its own
+// transaction, so one refused link (e.g. the products ended up in different
+// groups) doesn't undo the rest of the page; it is counted as failed and the
+// pair stays undecided.
+func (s *server) handleBulkDecide(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "bad form", http.StatusBadRequest)
+		return
+	}
+	ok := make(map[string]bool)
+	for _, p := range r.Form["ok"] {
+		ok[p] = true
+	}
+	var matched, rejected, failed int
+	for _, p := range r.Form["pair"] {
+		var l, rt int64
+		if _, err := fmt.Sscanf(p, "%d-%d", &l, &rt); err != nil {
+			http.Error(w, "bad pair "+p, http.StatusBadRequest)
+			return
+		}
+		err := decideMatch(r.Context(), s.pool, l, rt, ok[p])
+		var le linkError
+		switch {
+		case errors.As(err, &le):
+			failed++
+		case err != nil:
+			httpError(w, fmt.Errorf("recording bulk decision %s: %w", p, err))
+			return
+		case ok[p]:
+			matched++
+		default:
+			rejected++
+		}
+	}
+	back := url.Values{
+		"min": {r.FormValue("min")}, "size": {r.FormValue("size")},
+		"matched": {strconv.Itoa(matched)}, "rejected": {strconv.Itoa(rejected)}, "failed": {strconv.Itoa(failed)},
+	}
+	http.Redirect(w, r, "/match/bulk?"+back.Encode(), http.StatusSeeOther)
 }
