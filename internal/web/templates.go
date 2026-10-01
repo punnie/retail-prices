@@ -265,12 +265,17 @@ var productTmpl = template.Must(template.Must(tmpl.Clone()).Parse(`
 {{end}}
 
 {{if .Siblings}}
-<h2>Also sold at</h2>
+<h2>Linked listings</h2>
 <table>
-<thead><tr><th>Store</th><th>Price</th></tr></thead>
+<thead><tr><th>Store</th><th>Listing</th><th>Price</th><th>Last observed</th></tr></thead>
 <tbody>
 {{range .Siblings}}
-<tr><td><a href="/products/{{.ID}}">{{.Store}}</a></td><td>{{if .HasSnapshot}}{{moneyF .CurrentPrice}}{{else}}&mdash;{{end}}</td></tr>
+<tr>
+  <td>{{.Store}}{{if .SameStore}} <span class="label-tag label-pending">other listing here</span>{{end}}</td>
+  <td><a href="/products/{{.ID}}">{{.Name}}</a> <span class="muted">SKU {{.SKU}}</span></td>
+  <td>{{if .HasSnapshot}}{{moneyF .CurrentPrice}}{{else}}&mdash;{{end}}</td>
+  <td>{{.LastSeen.Format "2006-01-02"}}</td>
+</tr>
 {{end}}
 </tbody>
 </table>
@@ -356,12 +361,12 @@ var manualTmpl = template.Must(template.Must(tmpl.Clone()).Parse(`
 
 {{define "content"}}
 <h1>Link products manually</h1>
-<p class="muted">For pairs the suggestion queue missed. Search each side, pick one product from each, and confirm. Each retailer can appear only once in a group.</p>
+<p class="muted">For pairs the suggestion queue missed. Search each side, pick one product from each, and confirm. Both can be from the same retailer &mdash; for an item relisted under a new SKU.</p>
 {{if .Error}}<div class="error">{{.Error}}</div>{{end}}
 <form method="get" action="/match/manual">
   <div class="manual">
     {{template "side" (dict "Title" "Product" "S" .A)}}
-    {{template "side" (dict "Title" "Same product at another retailer" "S" .B)}}
+    {{template "side" (dict "Title" "Same product (another retailer, or a relisting)" "S" .B)}}
   </div>
   <div class="manual-actions">
     <button type="submit">Search</button>

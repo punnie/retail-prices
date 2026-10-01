@@ -116,9 +116,10 @@ func decideMatch(ctx context.Context, pool *pgxpool.Pool, leftID, rightID int64,
 
 // linkIntoGroup puts both products in one group, creating it or extending
 // whichever group either already belongs to. It refuses (rather than
-// silently skipping) the cases that would corrupt identity: the two already
-// sit in different groups (merging groups is a separate, deliberate act),
-// or the target group already has a different product from the same store.
+// silently skipping) when the two already sit in different groups — merging
+// groups is a separate, deliberate act. A group may hold several products
+// from the same store: retailers sometimes relist the same item under a new
+// SKU, often running both listings side by side for a while.
 func linkIntoGroup(ctx context.Context, tx pgx.Tx, leftID, rightID int64) error {
 	groupOf := func(pid int64) (int64, bool, error) {
 		var g int64
@@ -156,17 +157,6 @@ func linkIntoGroup(ctx context.Context, tx pgx.Tx, leftID, rightID int64) error 
 	for _, pid := range []int64{leftID, rightID} {
 		if pid == leftID && leftIn || pid == rightID && rightIn {
 			continue
-		}
-		var clash string
-		err := tx.QueryRow(ctx, `
-			SELECT other.name FROM product_group_members m
-			JOIN retail_products other ON other.id = m.retail_product_id
-			JOIN retail_products me ON me.id = $2
-			WHERE m.product_group_id = $1 AND other.store = me.store`, groupID, pid).Scan(&clash)
-		if err == nil {
-			return linkError(fmt.Sprintf("the group already has a product from the same store (%s)", clash))
-		} else if err != pgx.ErrNoRows {
-			return err
 		}
 		if _, err := tx.Exec(ctx, `
 			INSERT INTO product_group_members (product_group_id, retail_product_id) VALUES ($1, $2)`, groupID, pid); err != nil {
@@ -224,18 +214,17 @@ func loadLinkOption(ctx context.Context, pool *pgxpool.Pool, id int64) (*linkOpt
 }
 
 // searchLinkOptions finds non-phantom products by name (trigram similarity
-// or plain substring, so short/partial queries still hit), optionally
-// excluding one store — the other side of a link is always a different
-// retailer.
-func searchLinkOptions(ctx context.Context, pool *pgxpool.Pool, q, excludeStore string, limit int) ([]linkOption, error) {
+// or plain substring, so short/partial queries still hit), from every store
+// — the same store included, for relisted SKUs.
+func searchLinkOptions(ctx context.Context, pool *pgxpool.Pool, q string, limit int) ([]linkOption, error) {
 	nq := normalize.NormalizeName(q)
 	if nq == "" {
 		return nil, nil
 	}
 	rows, err := pool.Query(ctx, linkOptionSelect+`
-		WHERE NOT rp.is_phantom AND rp.store <> $2
+		WHERE NOT rp.is_phantom
 		  AND (rp.name_norm % $1 OR rp.name_norm ILIKE '%' || $1 || '%')
-		ORDER BY similarity(rp.name_norm, $1) DESC LIMIT $3`, nq, excludeStore, limit)
+		ORDER BY similarity(rp.name_norm, $1) DESC LIMIT $2`, nq, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -303,7 +292,7 @@ type manualView struct {
 
 const manualResultLimit = 12
 
-func (s *server) buildManualSide(ctx context.Context, field, q, selected, excludeStore string) (manualSide, error) {
+func (s *server) buildManualSide(ctx context.Context, field, q, selected string) (manualSide, error) {
 	side := manualSide{Field: field, Query: q}
 	if id, err := strconv.ParseInt(selected, 10, 64); err == nil {
 		sel, err := loadLinkOption(ctx, s.pool, id)
@@ -314,7 +303,7 @@ func (s *server) buildManualSide(ctx context.Context, field, q, selected, exclud
 	}
 	if q != "" {
 		side.Searched = true
-		hits, err := searchLinkOptions(ctx, s.pool, q, excludeStore, manualResultLimit)
+		hits, err := searchLinkOptions(ctx, s.pool, q, manualResultLimit)
 		if err != nil {
 			return side, err
 		}
@@ -331,30 +320,15 @@ func (s *server) buildManualSide(ctx context.Context, field, q, selected, exclud
 }
 
 // buildManualView assembles the manual-link page from the request's
-// selections (a, b) and searches (qa, qb). Each side searches only other
-// retailers than the opposite side's selection.
+// selections (a, b) and searches (qa, qb).
 func (s *server) buildManualView(ctx context.Context, vals map[string]string) (manualView, error) {
 	v := manualView{Title: "Link products manually"}
 	var err error
-	if v.A, err = s.buildManualSide(ctx, "a", vals["qa"], vals["a"], ""); err != nil {
+	if v.A, err = s.buildManualSide(ctx, "a", vals["qa"], vals["a"]); err != nil {
 		return v, err
 	}
-	if v.B, err = s.buildManualSide(ctx, "b", vals["qb"], vals["b"], ""); err != nil {
-		return v, err
-	}
-	// Re-run each search excluding the other side's store now that both
-	// selections are known.
-	if v.B.Selected != nil && v.A.Searched {
-		if v.A, err = s.buildManualSide(ctx, "a", vals["qa"], vals["a"], v.B.Selected.Store); err != nil {
-			return v, err
-		}
-	}
-	if v.A.Selected != nil && v.B.Searched {
-		if v.B, err = s.buildManualSide(ctx, "b", vals["qb"], vals["b"], v.A.Selected.Store); err != nil {
-			return v, err
-		}
-	}
-	return v, nil
+	v.B, err = s.buildManualSide(ctx, "b", vals["qb"], vals["b"])
+	return v, err
 }
 
 func (s *server) handleManualLink(w http.ResponseWriter, r *http.Request) {

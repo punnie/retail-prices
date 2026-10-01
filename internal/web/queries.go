@@ -199,22 +199,30 @@ func loadObservedIntervals(ctx context.Context, pool *pgxpool.Pool, id int64) ([
 type siblingRow struct {
 	ID           int64
 	Store        string
+	SKU          string
+	Name         string
+	SameStore    bool
 	CurrentPrice float64
 	HasSnapshot  bool
+	LastSeen     time.Time
 }
 
 // loadGroupSiblings returns the other products in this product's
-// product_group (the confirmed cross-retailer identity, see
-// db/migrations/002_derived_schema.sql), if any.
+// product_group (the confirmed identity, see
+// db/migrations/002_derived_schema.sql), if any — other retailers first,
+// then other listings at this product's own store (relisted SKUs).
 func loadGroupSiblings(ctx context.Context, pool *pgxpool.Pool, id int64) ([]siblingRow, error) {
 	rows, err := pool.Query(ctx, `
-		SELECT rp.id, rp.store, coalesce(pps.current_price, 0), pps.current_price IS NOT NULL
+		SELECT rp.id, rp.store, rp.sku, rp.name, rp.store = mine.store,
+		       coalesce(pps.current_price, 0), pps.current_price IS NOT NULL,
+		       coalesce(pps.last_observed_at, rp.last_seen)
 		FROM product_group_members me
+		JOIN retail_products mine ON mine.id = me.retail_product_id
 		JOIN product_group_members other ON other.product_group_id = me.product_group_id AND other.retail_product_id <> me.retail_product_id
 		JOIN retail_products rp ON rp.id = other.retail_product_id
 		LEFT JOIN product_pricing_snapshot pps ON pps.retail_product_id = rp.id
 		WHERE me.retail_product_id = $1
-		ORDER BY rp.store`, id)
+		ORDER BY rp.store = mine.store, rp.store, rp.last_seen DESC`, id)
 	if err != nil {
 		return nil, err
 	}
@@ -223,7 +231,7 @@ func loadGroupSiblings(ctx context.Context, pool *pgxpool.Pool, id int64) ([]sib
 	var out []siblingRow
 	for rows.Next() {
 		var s siblingRow
-		if err := rows.Scan(&s.ID, &s.Store, &s.CurrentPrice, &s.HasSnapshot); err != nil {
+		if err := rows.Scan(&s.ID, &s.Store, &s.SKU, &s.Name, &s.SameStore, &s.CurrentPrice, &s.HasSnapshot, &s.LastSeen); err != nil {
 			return nil, err
 		}
 		out = append(out, s)
@@ -231,9 +239,6 @@ func loadGroupSiblings(ctx context.Context, pool *pgxpool.Pool, id int64) ([]sib
 	return out, rows.Err()
 }
 
-// normalizeQuery lower-cases a free-text search so it compares fairly
-// against name_norm (see internal/normalize.NormalizeName) without needing
-// the full accent-folding pipeline for a short query string.
 func normalizeQuery(q string) string {
 	b := []byte(q)
 	for i, c := range b {
