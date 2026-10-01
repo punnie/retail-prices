@@ -64,6 +64,8 @@ func Run(ctx context.Context, args []string) error {
 	mux.HandleFunc("GET /products/{id}", s.handleProduct)
 	mux.HandleFunc("GET /match", s.handleMatchQueue)
 	mux.HandleFunc("POST /match/decide", s.handleMatchDecide)
+	mux.HandleFunc("GET /match/manual", s.handleManualLink)
+	mux.HandleFunc("POST /match/manual", s.handleManualLinkPost)
 	mux.HandleFunc("GET /img", imgProxy.ServeHTTP)
 
 	fmt.Fprintf(os.Stderr, "listening on %s (image cache: %s, ttl %s)\n", *addr, *imageCacheDir, *imageCacheTTL)

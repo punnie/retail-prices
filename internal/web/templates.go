@@ -122,6 +122,18 @@ const styleBlock = `
   .candidate button.confirm { background: #0ca30c; color: #fff; border-color: #0ca30c; }
   .candidate button.reject { background: #fff; color: #d03b3b; border-color: #d03b3b; }
   .stale { color: #ec835a; }
+  .candidate .side { display: flex; gap: 0.7rem; align-items: center; }
+  .thumb { width: 64px; height: 64px; object-fit: contain; background: #fff; border-radius: 4px; flex: none; }
+  .manual { display: grid; grid-template-columns: 1fr 1fr; gap: 1.2rem; align-items: start; }
+  .manual .col { border: 1px solid #e4e3de; border-radius: 8px; padding: 0.8rem; background: #fcfcfb; }
+  .manual .col input[type=text] { width: 100%; box-sizing: border-box; padding: 0.5rem 0.7rem; border: 1px solid #c3c2b7; border-radius: 6px; margin-bottom: 0.6rem; }
+  .manual label.opt { display: flex; gap: 0.6rem; align-items: center; padding: 0.4rem; border-radius: 6px; cursor: pointer; }
+  .manual label.opt:hover, .manual label.opt:has(input:checked) { background: #eef1fb; }
+  .manual .links { font-size: 0.78rem; }
+  .manual-actions { margin: 1.2rem 0; display: flex; gap: 1rem; align-items: center; }
+  .manual-actions button { padding: 0.5rem 1.2rem; border-radius: 6px; border: 1px solid #0ca30c; background: #0ca30c; color: #fff; cursor: pointer; }
+  .error { background: rgba(208,59,59,0.1); border-left: 3px solid #d03b3b; padding: 0.6rem 0.9rem; border-radius: 4px; margin: 1rem 0; }
+  @media (max-width: 700px) { .manual { grid-template-columns: 1fr; } }
 </style>`
 
 var tmpl = template.Must(template.New("web").Funcs(funcs).Parse(`
@@ -131,7 +143,7 @@ var tmpl = template.Must(template.New("web").Funcs(funcs).Parse(`
 <body>
 <header>
   <a href="/">Retail prices</a>
-  <nav><a href="/products">Catalogue</a><a href="/match">Linking queue</a></nav>
+  <nav><a href="/products">Catalogue</a><a href="/match">Linking queue</a><a href="/match/manual">Link manually</a></nav>
 </header>
 {{block "content" .}}{{end}}
 </body>
@@ -177,7 +189,8 @@ var productTmpl = template.Must(template.Must(tmpl.Clone()).Parse(`
 <h1>{{.Product.Name}}</h1>
 <p><span class="store-tag">{{.Product.Store}}</span> {{if .Product.Brand}}&middot; {{.Product.Brand}}{{end}}
   {{if .Product.PackValue}}&middot; {{num0 .Product.PackValue}}{{.Product.PackUnit}}{{end}}
-  &middot; <a href="{{.Product.URL}}" target="_blank" rel="noopener">view on {{.Product.Store}} &rarr;</a></p>
+  &middot; <a href="{{.Product.URL}}" target="_blank" rel="noopener">view on {{.Product.Store}} &rarr;</a>
+  &middot; <a href="/match/manual?a={{.Product.ID}}">link to another retailer&hellip;</a></p>
 
 {{if .HasSnapshot}}
 <p class="badge-line">{{.StateBadge}}</p>
@@ -257,7 +270,7 @@ var productTmpl = template.Must(template.Must(tmpl.Clone()).Parse(`
 <thead><tr><th>Store</th><th>Price</th></tr></thead>
 <tbody>
 {{range .Siblings}}
-<tr><td><a href="/products/{{.ID}}">{{.Store}}</a></td><td>{{if .HasPrice}}{{moneyF .CurrentPrice}}{{else}}&mdash;{{end}}</td></tr>
+<tr><td><a href="/products/{{.ID}}">{{.Store}}</a></td><td>{{if .HasSnapshot}}{{moneyF .CurrentPrice}}{{else}}&mdash;{{end}}</td></tr>
 {{end}}
 </tbody>
 </table>
@@ -274,20 +287,26 @@ var productTmpl = template.Must(template.Must(tmpl.Clone()).Parse(`
 var matchTmpl = template.Must(template.Must(tmpl.Clone()).Parse(`
 {{define "content"}}
 <h1>Cross-retailer linking queue</h1>
-<p class="muted">Suggested pairs from name/brand/pack-size matching, ranked by score. Nothing links automatically &mdash; confirm or reject each one.</p>
+<p class="muted">Suggested pairs from name/brand/pack-size matching, ranked by score. Nothing links automatically &mdash; confirm or reject each one. Missing a pair? <a href="/match/manual">Link products manually</a>.</p>
 {{if .Candidates}}
 {{range .Candidates}}
 <div class="candidate">
   <div class="side">
+    {{if .Left.ImageURL}}<img class="thumb" src="{{imgSrc .Left.ImageURL}}" alt="" loading="lazy">{{end}}
+    <div>
     <span class="store-tag">{{.Left.Store}}</span><br>
     <strong>{{.Left.Name}}</strong>{{if .Left.Brand}} <span class="muted">&middot; {{.Left.Brand}}</span>{{end}}<br>
-    {{if .Left.HasPrice}}{{moneyF .Left.Price}}{{end}}
+    {{if .Left.HasPrice}}{{moneyF .Left.Price}} &middot; {{end}}<a href="/products/{{.Left.ID}}" target="_blank">product page</a> &middot; <a href="{{.Left.URL}}" target="_blank" rel="noopener">on {{.Left.Store}} &nearr;</a>
+    </div>
   </div>
   <div class="score">{{printf "%.2f" .Score}}</div>
   <div class="side">
+    {{if .Right.ImageURL}}<img class="thumb" src="{{imgSrc .Right.ImageURL}}" alt="" loading="lazy">{{end}}
+    <div>
     <span class="store-tag">{{.Right.Store}}</span><br>
     <strong>{{.Right.Name}}</strong>{{if .Right.Brand}} <span class="muted">&middot; {{.Right.Brand}}</span>{{end}}<br>
-    {{if .Right.HasPrice}}{{moneyF .Right.Price}}{{end}}
+    {{if .Right.HasPrice}}{{moneyF .Right.Price}} &middot; {{end}}<a href="/products/{{.Right.ID}}" target="_blank">product page</a> &middot; <a href="{{.Right.URL}}" target="_blank" rel="noopener">on {{.Right.Store}} &nearr;</a>
+    </div>
   </div>
   <div class="actions">
     <form method="post" action="/match/decide">
@@ -308,5 +327,46 @@ var matchTmpl = template.Must(template.Must(tmpl.Clone()).Parse(`
 {{else}}
 <p class="empty">No pending candidates &mdash; run <code>retail match</code> to generate more.</p>
 {{end}}
+{{end}}
+`))
+
+var manualTmpl = template.Must(template.Must(tmpl.Clone()).Parse(`
+{{define "option"}}
+<label class="opt">
+  <input type="radio" name="{{.Field}}" value="{{.O.ID}}" {{if and .Sel (eq .Sel.ID .O.ID)}}checked{{end}}>
+  {{if .O.ImageURL}}<img class="thumb" src="{{imgSrc .O.ImageURL}}" alt="" loading="lazy">{{end}}
+  <span>
+    <span class="store-tag">{{.O.Store}}</span> <strong>{{.O.Name}}</strong>{{if .O.Brand}} <span class="muted">&middot; {{.O.Brand}}</span>{{end}}<br>
+    <span class="muted">{{if .O.HasPrice}}{{moneyF .O.Price}}{{end}}{{if .O.Pack}} &middot; {{.O.Pack}}{{end}}{{if .O.Grouped}} &middot; already in a group{{end}}</span>
+    <span class="links"><a href="/products/{{.O.ID}}" target="_blank">product page</a> &middot; <a href="{{.O.URL}}" target="_blank" rel="noopener">on {{.O.Store}} &nearr;</a></span>
+  </span>
+</label>
+{{end}}
+
+{{define "side"}}
+<div class="col">
+  <h3 style="margin-top:0">{{.Title}}</h3>
+  <input type="text" name="q{{.S.Field}}" placeholder="Search by name..." value="{{.S.Query}}">
+  {{if .S.List}}
+    {{range .S.List}}{{template "option" (dict "Field" $.S.Field "O" . "Sel" $.S.Selected)}}{{end}}
+  {{else if .S.Searched}}<p class="empty">No products found.</p>
+  {{else}}<p class="muted">Search, then pick the product.</p>{{end}}
+</div>
+{{end}}
+
+{{define "content"}}
+<h1>Link products manually</h1>
+<p class="muted">For pairs the suggestion queue missed. Search each side, pick one product from each, and confirm. Each retailer can appear only once in a group.</p>
+{{if .Error}}<div class="error">{{.Error}}</div>{{end}}
+<form method="get" action="/match/manual">
+  <div class="manual">
+    {{template "side" (dict "Title" "Product" "S" .A)}}
+    {{template "side" (dict "Title" "Same product at another retailer" "S" .B)}}
+  </div>
+  <div class="manual-actions">
+    <button type="submit">Search</button>
+    <button type="submit" formmethod="post" formaction="/match/manual">Same product &mdash; link them</button>
+  </div>
+</form>
 {{end}}
 `))
