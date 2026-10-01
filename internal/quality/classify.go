@@ -1,8 +1,9 @@
 // Package quality turns a product's raw price observations into a
-// run-length-encoded interval series plus a classified event for every
-// transition between intervals.
+// run-length-encoded interval series and flags the intervals that are
+// implausible for that product, so later stages (internal/pricing) never see
+// a retailer placeholder as a real price point.
 //
-// Classification is anchored on a robust per-product baseline — the
+// Flagging is anchored on a robust per-product baseline — the
 // observation-weighted median of that product's own price history — not on
 // the immediately preceding price. That distinction is the whole design.
 // Retailers park unpublished products at placeholder prices (Continente uses
@@ -10,17 +11,17 @@
 // thousands of distinct products), and a prev-anchored comparison reads those
 // backwards: placeholder -> real price looks like a huge promotion, and real
 // price -> placeholder looks like the promotion ending. Anchoring on what the
-// product normally costs makes a placeholder an outlier in both directions,
-// whichever side of a transition it sits on.
+// product normally costs makes a placeholder an outlier regardless of which
+// side of a transition it sits on.
 //
 // Thresholds come from the distributions measured by `retail profile` over
 // the real log, and from a hard domain fact: single-step retail price
 // increases of several hundred percent do not happen. Anything claiming one
-// is a data artifact, so it is quarantined rather than reported.
+// is a data artifact, so it is quarantined rather than passed on to pricing
+// analysis.
 package quality
 
 import (
-	"math"
 	"sort"
 	"time"
 )
@@ -41,51 +42,12 @@ type Interval struct {
 	IsSuspect        bool
 }
 
-type EventKind string
-
-const (
-	KindPromoStart EventKind = "promo_start"
-	KindPromoEnd   EventKind = "promo_end"
-	KindIncrease   EventKind = "increase"
-	KindDecrease   EventKind = "decrease"
-	KindSuspect    EventKind = "suspect"
-)
-
-// Event describes the transition into an interval from the one before it.
-type Event struct {
-	OldPrice   float64
-	NewPrice   float64
-	PctChange  float64
-	ChangedAt  time.Time
-	Kind       EventKind
-	Confidence float64
-}
-
 const (
 	// Outlier band around the product's own baseline. An interval outside
 	// this is quarantined: no real grocery item triples its price or falls
 	// to a quarter of normal and stays a legitimate observation.
 	maxAboveBaseline = 3.0
 	minBelowBaseline = 0.25
-
-	// A price at or below this share of baseline counts as a discount
-	// rather than ordinary drift.
-	promoThreshold = 0.85
-
-	// Hard caps on a single reported transition, applied even when both
-	// endpoints are individually inside the outlier band. Asymmetric on
-	// purpose: deep clearances ("saldos" at -70/-80%) are real, whereas a
-	// price more than tripling in one step is not repricing, it is a feed
-	// artifact.
-	maxIncreaseRatio = 3.0
-	minDropRatio     = 0.12
-
-	// How far ahead to look for a return to baseline when deciding whether
-	// a discount is a temporary promotion or a permanent repricing.
-	promoReturnLookahead = 10
-
-	// Tolerance for "back at baseline".
-	baselineReturnBand = 0.92
 
 	// Tighter band applied only to prices the store is known to use as
 	// filler (see store_placeholder_prices). A placeholder like Auchan's
@@ -174,22 +136,21 @@ func BaselinePrice(intervals []Interval) float64 {
 	return sorted[len(sorted)-1].Price
 }
 
-// ClassifyEvents flags outlier intervals against the product's baseline and
-// classifies every transition. It mutates IsSuspect on the slice it is given
-// and returns exactly len(intervals)-1 events, aligned to intervals[1:], so
-// every transition always carries a concrete Kind.
-func ClassifyEvents(intervals []Interval, opts Options) []Event {
-	if len(intervals) < 2 {
-		return nil
+// FlagSuspect quarantines intervals that are implausible for this product,
+// independent of where they sit in the series: outside the outlier band
+// around the product's own baseline, or a store-known placeholder price far
+// from this product's baseline. It mutates IsSuspect on the slice it is
+// given and returns the baseline used, so callers (internal/pricing) can
+// drop suspect intervals before spell classification ever sees them.
+func FlagSuspect(intervals []Interval, opts Options) (baseline float64) {
+	if len(intervals) == 0 {
+		return 0
 	}
-
-	baseline := BaselinePrice(intervals)
+	baseline = BaselinePrice(intervals)
 	if baseline <= 0 {
-		return nil
+		return baseline
 	}
 
-	// Pass 1: quarantine intervals that are implausible for this product,
-	// independent of where they sit in the series.
 	for i := range intervals {
 		r := intervals[i].Price / baseline
 		switch {
@@ -202,87 +163,5 @@ func ClassifyEvents(intervals []Interval, opts Options) []Event {
 			intervals[i].IsSuspect = true
 		}
 	}
-
-	// Pass 2: classify transitions. A promotion is a *temporary* discount
-	// below baseline, so promo_end is only ever emitted for a discount whose
-	// start we actually saw — otherwise a permanent step up from a low
-	// starting price would masquerade as a promotion ending.
-	events := make([]Event, len(intervals)-1)
-	inPromo := false
-
-	for i := 1; i < len(intervals); i++ {
-		prev, cur := intervals[i-1], intervals[i]
-		at := cur.ValidFrom
-		pct := pctChange(prev.Price, cur.Price)
-
-		if prev.IsSuspect || cur.IsSuspect {
-			events[i-1] = Event{prev.Price, cur.Price, pct, at, KindSuspect, 0.95}
-			inPromo = false
-			continue
-		}
-
-		ratio := cur.Price / prev.Price
-		if ratio > maxIncreaseRatio || ratio < minDropRatio {
-			events[i-1] = Event{prev.Price, cur.Price, pct, at, KindSuspect, 0.85}
-			inPromo = false
-			continue
-		}
-
-		rPrev := prev.Price / baseline
-		rCur := cur.Price / baseline
-
-		switch {
-		case !inPromo && rCur <= promoThreshold && rPrev > promoThreshold &&
-			returnsToBaseline(intervals, i+1, baseline):
-			events[i-1] = Event{prev.Price, cur.Price, pct, at, KindPromoStart, 0.9}
-			inPromo = true
-
-		case inPromo && rCur > promoThreshold:
-			events[i-1] = Event{prev.Price, cur.Price, pct, at, KindPromoEnd, 0.9}
-			inPromo = false
-
-		default:
-			events[i-1] = plainEvent(prev.Price, cur.Price, at, 0.9)
-			if rCur > promoThreshold {
-				inPromo = false
-			}
-		}
-	}
-
-	return events
-}
-
-// returnsToBaseline reports whether the price comes back up to roughly
-// baseline within a bounded lookahead — the test that separates a temporary
-// promotion from a permanent price cut. Suspect intervals are skipped rather
-// than treated as a return, so a placeholder spike can never "end" a promo.
-func returnsToBaseline(intervals []Interval, from int, baseline float64) bool {
-	limit := from + promoReturnLookahead
-	if limit > len(intervals) {
-		limit = len(intervals)
-	}
-	for j := from; j < limit; j++ {
-		if intervals[j].IsSuspect {
-			continue
-		}
-		if intervals[j].Price/baseline >= baselineReturnBand {
-			return true
-		}
-	}
-	return false
-}
-
-func plainEvent(oldPrice, newPrice float64, at time.Time, confidence float64) Event {
-	kind := KindIncrease
-	if newPrice < oldPrice {
-		kind = KindDecrease
-	}
-	return Event{oldPrice, newPrice, pctChange(oldPrice, newPrice), at, kind, confidence}
-}
-
-func pctChange(oldPrice, newPrice float64) float64 {
-	if oldPrice == 0 {
-		return math.Inf(1)
-	}
-	return 100 * (newPrice - oldPrice) / oldPrice
+	return baseline
 }

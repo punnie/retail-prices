@@ -1,14 +1,15 @@
 // Package refresh rebuilds the derived layer (scrape_runs, retail_products,
-// price_intervals, price_events) from the raw products log.
+// price_intervals, price_spells, regular_price_changes,
+// product_pricing_snapshot) from the raw products log.
 //
 // retail_products is upserted by (store, sku) so its id — the join key used
 // by human-curated tables (match_decisions, product_group_members,
-// basket_items) — never changes across refreshes. price_intervals and
-// price_events have no such external references, so they're simply
-// truncated and rebuilt in full each run. There is no incremental
-// watermarking yet: every refresh rescans the whole raw log, which the
-// profiler showed takes low minutes even at 28M rows — a reasonable v1
-// trade-off given refreshes are periodic (daily/hourly), not continuous.
+// basket_items) — never changes across refreshes. The rest have no such
+// external references, so they're simply truncated and rebuilt in full each
+// run. There is no incremental watermarking yet: every refresh rescans the
+// whole raw log, which the profiler showed takes low minutes even at 28M
+// rows — a reasonable v1 trade-off given refreshes are periodic
+// (daily/hourly), not continuous.
 package refresh
 
 import (
@@ -48,9 +49,9 @@ const flushEvery = 5000
 
 func Run(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("refresh", flag.ContinueOnError)
-	reclassifyOnly := fs.Bool("reclassify-only", false,
-		"skip the raw-log rescan and only redo placeholder derivation + classification "+
-			"(phases B and C); use when only the quality rules changed")
+	pricingOnly := fs.Bool("pricing-only", false,
+		"skip the raw-log rescan and only redo placeholder derivation + pricing analysis "+
+			"(phases B and C); use when only pricing_params or the classifier changed")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -61,9 +62,9 @@ func Run(ctx context.Context, args []string) error {
 	}
 	defer pool.Close()
 
-	if *reclassifyOnly {
-		fmt.Fprintln(os.Stderr, "==> reclassify-only: resetting derived classification")
-		if _, err := pool.Exec(ctx, "TRUNCATE price_events"); err != nil {
+	if *pricingOnly {
+		fmt.Fprintln(os.Stderr, "==> pricing-only: resetting derived pricing analysis")
+		if _, err := pool.Exec(ctx, "TRUNCATE price_spells, regular_price_changes, product_pricing_snapshot"); err != nil {
 			return err
 		}
 		if _, err := pool.Exec(ctx,
@@ -74,7 +75,7 @@ func Run(ctx context.Context, args []string) error {
 		if err := refreshPlaceholders(ctx, pool); err != nil {
 			return fmt.Errorf("deriving placeholder prices: %w", err)
 		}
-		fmt.Fprintln(os.Stderr, "==> phase C: classifying intervals and price events")
+		fmt.Fprintln(os.Stderr, "==> phase C: pricing analysis")
 		return classifyAll(ctx, pool)
 	}
 
@@ -88,8 +89,8 @@ func Run(ctx context.Context, args []string) error {
 		return fmt.Errorf("loading run counts: %w", err)
 	}
 
-	fmt.Fprintln(os.Stderr, "==> truncating price_intervals, price_events")
-	if _, err := pool.Exec(ctx, "TRUNCATE price_intervals, price_events"); err != nil {
+	fmt.Fprintln(os.Stderr, "==> truncating price_intervals, price_spells, regular_price_changes, product_pricing_snapshot")
+	if _, err := pool.Exec(ctx, "TRUNCATE price_intervals, price_spells, regular_price_changes, product_pricing_snapshot"); err != nil {
 		return err
 	}
 
@@ -97,11 +98,16 @@ func Run(ctx context.Context, args []string) error {
 	// then derives each store's placeholder prices, which needs the baselines
 	// Phase A computed — a price is only identifiable as filler by looking at
 	// whether the products wearing it normally cost anything like it. Phase C
-	// re-reads the (much smaller) interval series to flag outliers and emit
-	// events with that store-level knowledge in hand.
+	// re-reads the (much smaller) interval series to flag outliers and run
+	// the spell decomposition with that store-level knowledge in hand.
 	fmt.Fprintln(os.Stderr, "==> phase A: raw products -> retail_products, price_intervals")
 	if err := refreshProducts(ctx, pool, runIdx); err != nil {
 		return err
+	}
+
+	fmt.Fprintln(os.Stderr, "==> flagging generic-name non-products")
+	if err := flagGenericNames(ctx, pool); err != nil {
+		return fmt.Errorf("flagging generic-name products: %w", err)
 	}
 
 	fmt.Fprintln(os.Stderr, "==> phase B: deriving store placeholder prices")
@@ -109,7 +115,7 @@ func Run(ctx context.Context, args []string) error {
 		return fmt.Errorf("deriving placeholder prices: %w", err)
 	}
 
-	fmt.Fprintln(os.Stderr, "==> phase C: classifying intervals and price events")
+	fmt.Fprintln(os.Stderr, "==> phase C: pricing analysis")
 	return classifyAll(ctx, pool)
 }
 

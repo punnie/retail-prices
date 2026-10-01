@@ -2,6 +2,9 @@
 .pgdata/
 .pgrun/
 
+# Cached retailer product images (see internal/imageproxy)
+.imagecache/
+
 # Source data dumps — large, not ours to redistribute
 *.dump
 
