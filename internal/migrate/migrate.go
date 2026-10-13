@@ -1,6 +1,8 @@
 // Package migrate applies the numbered SQL files in db/migrations against a
-// schema_migrations table, in order, exactly once each. It only ever touches
-// the derived schema — the raw `products` table is never migrated.
+// schema_migrations table, in order, exactly once each. That covers the raw
+// `products` log (migration 008 adopts it with CREATE TABLE IF NOT EXISTS, so
+// existing rows and indexes are never rewritten), the scraper's job records
+// and the whole derived schema.
 package migrate
 
 import (
@@ -57,6 +59,15 @@ func Run(ctx context.Context, args []string) error {
 	}
 	defer pool.Close()
 
+	if err := Apply(ctx, pool); err != nil {
+		return err
+	}
+	fmt.Println("up to date")
+	return nil
+}
+
+// Apply applies every migration not yet recorded in schema_migrations.
+func Apply(ctx context.Context, pool *pgxpool.Pool) error {
 	migrations, err := loadMigrations()
 	if err != nil {
 		return err
@@ -93,8 +104,6 @@ func Run(ctx context.Context, args []string) error {
 			return err
 		}
 	}
-
-	fmt.Println("up to date")
 	return nil
 }
 

@@ -1,5 +1,5 @@
 // Command retail is the CLI entrypoint for the retail-prices platform:
-// migrate | profile | refresh | match | serve | admin.
+// scrape | run | migrate | profile | refresh | match | serve | admin.
 package main
 
 import (
@@ -10,6 +10,7 @@ import (
 	"retail-prices/internal/auth"
 	"retail-prices/internal/matching"
 	"retail-prices/internal/migrate"
+	"retail-prices/internal/pipeline"
 	"retail-prices/internal/profile"
 	"retail-prices/internal/refresh"
 	"retail-prices/internal/web"
@@ -26,6 +27,10 @@ func main() {
 
 	var err error
 	switch cmd {
+	case "scrape":
+		err = pipeline.RunScrape(ctx, args)
+	case "run":
+		err = pipeline.RunStore(ctx, args)
 	case "profile":
 		err = profile.Run(ctx, args)
 	case "migrate":
@@ -53,9 +58,11 @@ func usage() {
 	fmt.Fprintln(os.Stderr, `usage: retail <command> [args]
 
 commands:
+  run       scrape one retailer, then refresh and match its catalogue
+  scrape    scrape one retailer into the raw products log
   profile   analyse the raw products log and print a data-quality report
-  migrate   apply derived-schema migrations
-  refresh   rebuild the derived layer from the raw log
+  migrate   apply database migrations
+  refresh   rebuild the derived layer from the raw log (--store for one)
   match     generate cross-retailer match candidates for human review
   serve     run the catalogue + matching review web app
   admin     administrator access: login-link, revoke-sessions`)

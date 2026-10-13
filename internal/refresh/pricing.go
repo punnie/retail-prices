@@ -7,68 +7,45 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 
 	"retail-prices/internal/pricing"
 	"retail-prices/internal/quality"
 )
 
-// classifyAll is phase C of a refresh: it re-reads the interval series built
-// by phase A, now that phase B has derived each store's placeholder prices,
-// quarantines implausible intervals (internal/quality), and runs the
-// internal/pricing spell decomposition over what's left — writing
-// price_spells, regular_price_changes and product_pricing_snapshot.
+// classifyStore is phase C of a refresh: it re-reads the store's interval
+// series built by phase A, now that phase B has derived the store's
+// placeholder prices, quarantines implausible intervals (internal/quality),
+// and runs the internal/pricing spell decomposition over what's left —
+// writing price_spells, regular_price_changes and product_pricing_snapshot.
 //
 // Reading price_intervals rather than the raw log is what makes a second
-// pass cheap — a few million rows instead of 28 million.
-func classifyAll(ctx context.Context, pool *pgxpool.Pool) error {
-	placeholders, err := loadPlaceholders(ctx, pool)
+// pass cheap — a few million rows instead of 28 million. Those intervals
+// were written inside tx and are only visible there, so they are read on tx
+// too, a batch of products at a time: each batch is read in full before its
+// results are written, since a pgx connection can't write while a query's
+// rows are still open.
+func classifyStore(ctx context.Context, tx pgx.Tx, store string) error {
+	placeholders, err := loadPlaceholders(ctx, tx, store)
 	if err != nil {
 		return fmt.Errorf("loading placeholder prices: %w", err)
 	}
-	for store, prices := range placeholders {
-		fmt.Fprintf(os.Stderr, "  %s: %d placeholder price(s)\n", store, len(prices))
-	}
+	fmt.Fprintf(os.Stderr, "  %s: %d placeholder price(s)\n", store, len(placeholders))
 
-	params, err := loadPricingParams(ctx, pool)
+	params, err := loadPricingParams(ctx, tx)
 	if err != nil {
 		return fmt.Errorf("loading pricing params: %w", err)
 	}
+	p := params.forStore(store)
 
-	runIdx, err := loadRunIndex(ctx, pool)
+	runIdx, err := loadRunIndex(ctx, tx, store)
 	if err != nil {
 		return fmt.Errorf("loading run index: %w", err)
 	}
 
-	readConn, err := pool.Acquire(ctx)
-	if err != nil {
-		return err
-	}
-	defer readConn.Release()
-	if _, err := readConn.Exec(ctx, "SET work_mem = '512MB'"); err != nil {
-		return err
-	}
-
-	writeConn, err := pool.Acquire(ctx)
-	if err != nil {
-		return err
-	}
-	defer writeConn.Release()
-
-	rows, err := readConn.Query(ctx, `
-		SELECT pi.id, pi.retail_product_id, rp.store, pi.price, pi.valid_from, pi.valid_to, pi.observation_count
-		FROM price_intervals pi
-		JOIN retail_products rp ON rp.id = pi.retail_product_id
-		WHERE NOT rp.is_phantom
-		ORDER BY pi.retail_product_id, pi.valid_from`)
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
+	writeConn := tx
 
 	var (
 		curProduct   int64
-		curStore     string
 		ids          []int64
 		intervals    []quality.Interval
 		suspectIDs   []int64
@@ -123,12 +100,10 @@ func classifyAll(ctx context.Context, pool *pgxpool.Pool) error {
 		}
 		productsSeen++
 
-		p := params.forStore(curStore)
-		storePlaceholders := placeholders[curStore]
 		opts := quality.Options{}
-		if len(storePlaceholders) > 0 {
+		if len(placeholders) > 0 {
 			opts.IsPlaceholderPrice = func(price float64) bool {
-				return storePlaceholders[roundCents(price)]
+				return placeholders[roundCents(price)]
 			}
 		}
 		quality.FlagSuspect(intervals, opts)
@@ -145,7 +120,7 @@ func classifyAll(ctx context.Context, pool *pgxpool.Pool) error {
 			return
 		}
 
-		hadActivity := func(from, to time.Time) bool { return runIdx.countBetween(curStore, from, to) > 0 }
+		hadActivity := func(from, to time.Time) bool { return runIdx.countBetween(store, from, to) > 0 }
 		spells, changes := pricing.Classify(clean, p, hadActivity)
 		if len(spells) == 0 {
 			return
@@ -171,37 +146,62 @@ func classifyAll(ctx context.Context, pool *pgxpool.Pool) error {
 		})
 	}
 
-	for rows.Next() {
-		var (
-			id, productID int64
-			store         string
-			iv            quality.Interval
-		)
-		if err := rows.Scan(&id, &productID, &store, &iv.Price, &iv.ValidFrom, &iv.ValidTo, &iv.ObservationCount); err != nil {
+	type row struct {
+		id, productID int64
+		iv            quality.Interval
+	}
+	var batch []row
+	var lastProduct int64
+	for {
+		rows, err := tx.Query(ctx, `
+			SELECT pi.id, pi.retail_product_id, pi.price, pi.valid_from, pi.valid_to, pi.observation_count
+			FROM price_intervals pi
+			WHERE pi.retail_product_id IN (
+				SELECT id FROM retail_products
+				WHERE store = $1 AND NOT is_phantom AND id > $2
+				ORDER BY id
+				LIMIT $3
+			)
+			ORDER BY pi.retail_product_id, pi.valid_from`, store, lastProduct, flushEvery)
+		if err != nil {
 			return err
 		}
-
-		if productID != curProduct {
-			processProduct()
-			if productsSeen%flushEvery == 0 && productsSeen > 0 {
-				if err := flush(); err != nil {
-					return err
-				}
-				fmt.Fprintf(os.Stderr, "  priced %d products\n", productsSeen)
+		batch = batch[:0]
+		for rows.Next() {
+			var r row
+			if err := rows.Scan(&r.id, &r.productID, &r.iv.Price, &r.iv.ValidFrom, &r.iv.ValidTo, &r.iv.ObservationCount); err != nil {
+				rows.Close()
+				return err
 			}
-			curProduct, curStore = productID, store
-			ids = ids[:0]
-			intervals = intervals[:0]
+			batch = append(batch, r)
 		}
-		ids = append(ids, id)
-		intervals = append(intervals, iv)
-	}
-	if err := rows.Err(); err != nil {
-		return err
-	}
-	processProduct()
-	if err := flush(); err != nil {
-		return err
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		if len(batch) == 0 {
+			break
+		}
+
+		for _, r := range batch {
+			if r.productID != curProduct {
+				processProduct()
+				curProduct = r.productID
+				ids = ids[:0]
+				intervals = intervals[:0]
+			}
+			ids = append(ids, r.id)
+			intervals = append(intervals, r.iv)
+		}
+		processProduct()
+		curProduct = 0
+		ids = ids[:0]
+		intervals = intervals[:0]
+		if err := flush(); err != nil {
+			return err
+		}
+		lastProduct = batch[len(batch)-1].productID
+		fmt.Fprintf(os.Stderr, "  priced %d products\n", productsSeen)
 	}
 
 	fmt.Fprintf(os.Stderr, "done: priced %d products\n", productsSeen)
@@ -215,24 +215,20 @@ func roundCents(price float64) float64 {
 	return float64(int64(price*100+0.5)) / 100
 }
 
-func loadPlaceholders(ctx context.Context, pool *pgxpool.Pool) (map[string]map[float64]bool, error) {
-	rows, err := pool.Query(ctx, `SELECT store, price FROM store_placeholder_prices`)
+func loadPlaceholders(ctx context.Context, tx pgx.Tx, store string) (map[float64]bool, error) {
+	rows, err := tx.Query(ctx, `SELECT price FROM store_placeholder_prices WHERE store = $1`, store)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
-	out := map[string]map[float64]bool{}
+	out := map[float64]bool{}
 	for rows.Next() {
-		var store string
 		var price float64
-		if err := rows.Scan(&store, &price); err != nil {
+		if err := rows.Scan(&price); err != nil {
 			return nil, err
 		}
-		if out[store] == nil {
-			out[store] = map[float64]bool{}
-		}
-		out[store][roundCents(price)] = true
+		out[roundCents(price)] = true
 	}
 	return out, rows.Err()
 }
@@ -251,8 +247,8 @@ func (s pricingParamSet) forStore(store string) pricing.Params {
 	return s.global
 }
 
-func loadPricingParams(ctx context.Context, pool *pgxpool.Pool) (pricingParamSet, error) {
-	rows, err := pool.Query(ctx, `SELECT store, min_reg_days, max_promo_days, trend_window_days, max_gap_days FROM pricing_params`)
+func loadPricingParams(ctx context.Context, tx pgx.Tx) (pricingParamSet, error) {
+	rows, err := tx.Query(ctx, `SELECT store, min_reg_days, max_promo_days, trend_window_days, max_gap_days FROM pricing_params`)
 	if err != nil {
 		return pricingParamSet{}, err
 	}
