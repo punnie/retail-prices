@@ -5,8 +5,6 @@ go 1.26.7
 require (
 	github.com/PuerkitoBio/goquery v1.10.3
 	github.com/jackc/pgx/v5 v5.11.0
-	github.com/lib/pq v1.10.9
-	github.com/mattn/go-sqlite3 v1.14.30
 	golang.org/x/text v0.29.0
 	golang.org/x/time v0.12.0
 )

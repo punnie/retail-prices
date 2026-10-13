@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"retail-prices/internal/scrape/config"
-	storage "retail-prices/internal/scrape/rawlog"
+	"retail-prices/internal/scrape/rawlog"
 
 	"github.com/PuerkitoBio/goquery"
 	"golang.org/x/time/rate"
@@ -46,7 +46,7 @@ type GTMInfo struct {
 }
 
 // ScrapeProducts implements parallel scraping for Pingo Doce
-func (p *PingoDoceScraper) ScrapeProducts(cfg *config.Config, store storage.Storage, limiter *rate.Limiter) error {
+func (p *PingoDoceScraper) ScrapeProducts(cfg *config.Config, store rawlog.Sink, limiter *rate.Limiter) error {
 	ctx := context.Background()
 
 	fmt.Printf("Starting to scrape Pingo Doce products using API endpoint (parallel mode with %d workers)\n", cfg.MaxConcurrentWorkers)
@@ -81,7 +81,7 @@ func (p *PingoDoceScraper) ScrapeProducts(cfg *config.Config, store storage.Stor
 
 		doc, err := p.FetchPage(ctx, apiURL, limiter)
 		if err != nil {
-			fmt.Printf("Failed to fetch page at start=%d: %v\n", start, err)
+			store.SourceFailed(apiURL, err)
 			break
 		}
 
@@ -130,7 +130,7 @@ func (p *PingoDoceScraper) ScrapeProducts(cfg *config.Config, store storage.Stor
 
 			count, err := p.processPageParallel(ctx, url, cfg, store, workerPool, &totalProducts)
 			if err != nil {
-				fmt.Printf("Warning: failed to process page %s: %v\n", url, err)
+				store.SourceFailed(url, err)
 				return
 			}
 
@@ -149,7 +149,7 @@ func (p *PingoDoceScraper) ScrapeProducts(cfg *config.Config, store storage.Stor
 }
 
 // processPageParallel processes a single API page using parallel workers
-func (p *PingoDoceScraper) processPageParallel(ctx context.Context, pageURL string, cfg *config.Config, store storage.Storage, workerPool *WorkerPool, totalProducts *int64) (int, error) {
+func (p *PingoDoceScraper) processPageParallel(ctx context.Context, pageURL string, cfg *config.Config, store rawlog.Sink, workerPool *WorkerPool, totalProducts *int64) (int, error) {
 	// Fetch page with rate limiting
 	doc, err := p.FetchPage(ctx, pageURL, workerPool.limiter)
 	if err != nil {
@@ -202,7 +202,7 @@ func (p *PingoDoceScraper) processPageParallel(ctx context.Context, pageURL stri
 }
 
 // extractProductFromElement extracts product information from a product element
-func (p *PingoDoceScraper) extractProductFromElement(s *goquery.Selection) *storage.Product {
+func (p *PingoDoceScraper) extractProductFromElement(s *goquery.Selection) *rawlog.Product {
 	if _, exists := s.Attr("data-pid"); !exists {
 		return nil
 	}
@@ -257,7 +257,7 @@ func (p *PingoDoceScraper) extractProductFromElement(s *goquery.Selection) *stor
 		}
 	}
 
-	product := &storage.Product{
+	product := &rawlog.Product{
 		Store:       p.name,
 		Name:        name,
 		Price:       priceValue,

@@ -20,6 +20,7 @@ import (
 
 	"retail-prices/internal/db"
 	"retail-prices/internal/normalize"
+	"retail-prices/internal/retailer"
 )
 
 func Run(ctx context.Context, args []string) error {
@@ -436,7 +437,7 @@ func sampledCoverage(ctx context.Context, conn *pgxpool.Conn, w io.Writer, sampl
 	tw := newTabWriter(w)
 	fmt.Fprintf(tw, "sample size requested: ~%.1f%% of rows via TABLESAMPLE SYSTEM\n\n", samplePct)
 	fmt.Fprintln(tw, "store\tsampled rows\tSKU-in-URL matched\tpack-size-in-description matched")
-	for _, store := range []string{"Auchan", "Continente", "Pingo Doce", "Celeiro"} {
+	for _, store := range retailer.Names() {
 		c, ok := counters[store]
 		if !ok || c.total == 0 {
 			fmt.Fprintf(tw, "%s\t0\t-\t-\n", store)
@@ -451,7 +452,7 @@ func sampledCoverage(ctx context.Context, conn *pgxpool.Conn, w io.Writer, sampl
 	}
 
 	fmt.Fprintln(w)
-	for _, store := range []string{"Auchan", "Continente", "Pingo Doce", "Celeiro"} {
+	for _, store := range retailer.Names() {
 		c, ok := counters[store]
 		if !ok {
 			continue

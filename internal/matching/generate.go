@@ -10,6 +10,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"retail-prices/internal/db"
 )
 
 // blockingReason records which signal produced a candidate, so a future
@@ -56,9 +58,9 @@ func Run(ctx context.Context, args []string) error {
 		return fmt.Errorf("--workers must be >= 1, got %d", *workers)
 	}
 
-	url := os.Getenv("DATABASE_URL")
-	if url == "" {
-		return fmt.Errorf("DATABASE_URL is not set; run inside `nix develop` (or export it yourself)")
+	url, err := db.URL()
+	if err != nil {
+		return err
 	}
 	cfg, err := pgxpool.ParseConfig(url)
 	if err != nil {

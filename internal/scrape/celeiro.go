@@ -9,7 +9,7 @@ import (
 	"sync/atomic"
 
 	"retail-prices/internal/scrape/config"
-	storage "retail-prices/internal/scrape/rawlog"
+	"retail-prices/internal/scrape/rawlog"
 
 	"github.com/PuerkitoBio/goquery"
 	"golang.org/x/time/rate"
@@ -37,7 +37,7 @@ func NewCeleiroScraper() *CeleiroScraper {
 var productURLPattern = regexp.MustCompile(`^https://www\.celeiro\.pt/\d+-`)
 
 // ScrapeProducts implements parallel scraping for Celeiro
-func (c *CeleiroScraper) ScrapeProducts(cfg *config.Config, store storage.Storage, limiter *rate.Limiter) error {
+func (c *CeleiroScraper) ScrapeProducts(cfg *config.Config, store rawlog.Sink, limiter *rate.Limiter) error {
 	ctx := context.Background()
 
 	fmt.Printf("Fetching Celeiro sitemap index from: %s\n", c.sitemapIndexURL)
@@ -91,7 +91,7 @@ func (c *CeleiroScraper) ScrapeProducts(cfg *config.Config, store storage.Storag
 
 			count, err := c.processSitemap(ctx, sitemapURL, cfg, store, workerPool, &totalProducts)
 			if err != nil {
-				fmt.Printf("Warning: failed to process sitemap %s: %v\n", sitemapURL, err)
+				store.SourceFailed(sitemapURL, err)
 				return
 			}
 
@@ -117,7 +117,7 @@ func isProductURL(loc string) bool {
 }
 
 // processSitemap processes a single sitemap using parallel workers
-func (c *CeleiroScraper) processSitemap(ctx context.Context, sitemapURL string, cfg *config.Config, store storage.Storage, workerPool *WorkerPool, totalProducts *int64) (int, error) {
+func (c *CeleiroScraper) processSitemap(ctx context.Context, sitemapURL string, cfg *config.Config, store rawlog.Sink, workerPool *WorkerPool, totalProducts *int64) (int, error) {
 	// Fetch sitemap XML with rate limiting
 	xmlData, err := c.FetchXML(ctx, sitemapURL, workerPool.limiter)
 	if err != nil {
@@ -178,7 +178,7 @@ func (c *CeleiroScraper) processSitemap(ctx context.Context, sitemapURL string, 
 
 			product, err := c.scrapeProductPage(ctx, productURL, workerPool.limiter)
 			if err != nil {
-				fmt.Printf("Warning: failed to scrape product %s: %v\n", productURL, err)
+				store.ProductFailed(productURL, err)
 				return nil
 			}
 
@@ -206,7 +206,7 @@ func (c *CeleiroScraper) processSitemap(ctx context.Context, sitemapURL string, 
 }
 
 // scrapeProductPage scrapes a single product page with rate limiting
-func (c *CeleiroScraper) scrapeProductPage(ctx context.Context, productURL string, limiter *rate.Limiter) (*storage.Product, error) {
+func (c *CeleiroScraper) scrapeProductPage(ctx context.Context, productURL string, limiter *rate.Limiter) (*rawlog.Product, error) {
 	doc, err := c.FetchPage(ctx, productURL, limiter)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch product page: %w", err)
@@ -218,7 +218,7 @@ func (c *CeleiroScraper) scrapeProductPage(ctx context.Context, productURL strin
 // extractProductFromPage extracts product information from a Celeiro product page.
 // Celeiro is a Magento-based store. It does NOT emit JSON-LD Product data, but it
 // does use microdata (itemprop) and Open Graph meta tags extensively.
-func (c *CeleiroScraper) extractProductFromPage(doc *goquery.Document, productURL string) (*storage.Product, error) {
+func (c *CeleiroScraper) extractProductFromPage(doc *goquery.Document, productURL string) (*rawlog.Product, error) {
 	name := c.findProductName(doc)
 	if name == "" {
 		return nil, fmt.Errorf("could not find product name")

@@ -8,7 +8,7 @@ import (
 	"sync/atomic"
 
 	"retail-prices/internal/scrape/config"
-	storage "retail-prices/internal/scrape/rawlog"
+	"retail-prices/internal/scrape/rawlog"
 
 	"github.com/PuerkitoBio/goquery"
 	"golang.org/x/time/rate"
@@ -32,7 +32,7 @@ func NewAuchanScraper() *AuchanScraper {
 }
 
 // ScrapeProducts implements parallel scraping for Auchan
-func (a *AuchanScraper) ScrapeProducts(cfg *config.Config, store storage.Storage, limiter *rate.Limiter) error {
+func (a *AuchanScraper) ScrapeProducts(cfg *config.Config, store rawlog.Sink, limiter *rate.Limiter) error {
 	ctx := context.Background()
 
 	fmt.Printf("Fetching Auchan sitemap index from: %s\n", a.sitemapIndexURL)
@@ -84,7 +84,7 @@ func (a *AuchanScraper) ScrapeProducts(cfg *config.Config, store storage.Storage
 
 			count, err := a.processSitemap(ctx, sitemapURL, cfg, store, workerPool, &totalProducts)
 			if err != nil {
-				fmt.Printf("Warning: failed to process sitemap %s: %v\n", sitemapURL, err)
+				store.SourceFailed(sitemapURL, err)
 				return
 			}
 
@@ -116,7 +116,7 @@ func (a *AuchanScraper) filterProductSitemaps(sitemaps []Sitemap) []Sitemap {
 }
 
 // processSitemap processes a single sitemap using parallel workers
-func (a *AuchanScraper) processSitemap(ctx context.Context, sitemapURL string, cfg *config.Config, store storage.Storage, workerPool *WorkerPool, totalProducts *int64) (int, error) {
+func (a *AuchanScraper) processSitemap(ctx context.Context, sitemapURL string, cfg *config.Config, store rawlog.Sink, workerPool *WorkerPool, totalProducts *int64) (int, error) {
 	// Fetch sitemap XML with rate limiting
 	xmlData, err := a.FetchXML(ctx, sitemapURL, workerPool.limiter)
 	if err != nil {
@@ -168,7 +168,7 @@ func (a *AuchanScraper) processSitemap(ctx context.Context, sitemapURL string, c
 
 			product, err := a.scrapeProductPage(ctx, productURL, workerPool.limiter)
 			if err != nil {
-				fmt.Printf("Warning: failed to scrape product %s: %v\n", productURL, err)
+				store.ProductFailed(productURL, err)
 				return nil
 			}
 
@@ -196,7 +196,7 @@ func (a *AuchanScraper) processSitemap(ctx context.Context, sitemapURL string, c
 }
 
 // scrapeProductPage scrapes a single product page with rate limiting
-func (a *AuchanScraper) scrapeProductPage(ctx context.Context, productURL string, limiter *rate.Limiter) (*storage.Product, error) {
+func (a *AuchanScraper) scrapeProductPage(ctx context.Context, productURL string, limiter *rate.Limiter) (*rawlog.Product, error) {
 	doc, err := a.FetchPage(ctx, productURL, limiter)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch product page: %w", err)
@@ -206,7 +206,7 @@ func (a *AuchanScraper) scrapeProductPage(ctx context.Context, productURL string
 }
 
 // extractProductFromPage extracts product information from a product page
-func (a *AuchanScraper) extractProductFromPage(doc *goquery.Document, productURL string) (*storage.Product, error) {
+func (a *AuchanScraper) extractProductFromPage(doc *goquery.Document, productURL string) (*rawlog.Product, error) {
 	name := a.findProductName(doc)
 	if name == "" {
 		return nil, fmt.Errorf("could not find product name")

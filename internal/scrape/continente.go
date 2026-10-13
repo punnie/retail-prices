@@ -8,7 +8,7 @@ import (
 	"sync/atomic"
 
 	"retail-prices/internal/scrape/config"
-	storage "retail-prices/internal/scrape/rawlog"
+	"retail-prices/internal/scrape/rawlog"
 
 	"github.com/PuerkitoBio/goquery"
 	"golang.org/x/time/rate"
@@ -32,7 +32,7 @@ func NewContinenteScraper() *ContinenteScraper {
 }
 
 // ScrapeProducts implements parallel scraping for Continente
-func (c *ContinenteScraper) ScrapeProducts(cfg *config.Config, store storage.Storage, limiter *rate.Limiter) error {
+func (c *ContinenteScraper) ScrapeProducts(cfg *config.Config, store rawlog.Sink, limiter *rate.Limiter) error {
 	ctx := context.Background()
 
 	fmt.Printf("Fetching Continente sitemap index from: %s\n", c.sitemapIndexURL)
@@ -84,7 +84,7 @@ func (c *ContinenteScraper) ScrapeProducts(cfg *config.Config, store storage.Sto
 
 			count, err := c.processSitemap(ctx, sitemapURL, cfg, store, workerPool, &totalProducts)
 			if err != nil {
-				fmt.Printf("Warning: failed to process sitemap %s: %v\n", sitemapURL, err)
+				store.SourceFailed(sitemapURL, err)
 				return
 			}
 
@@ -116,7 +116,7 @@ func (c *ContinenteScraper) filterProductSitemaps(sitemaps []Sitemap) []Sitemap 
 }
 
 // processSitemap processes a single sitemap using parallel workers
-func (c *ContinenteScraper) processSitemap(ctx context.Context, sitemapURL string, cfg *config.Config, store storage.Storage, workerPool *WorkerPool, totalProducts *int64) (int, error) {
+func (c *ContinenteScraper) processSitemap(ctx context.Context, sitemapURL string, cfg *config.Config, store rawlog.Sink, workerPool *WorkerPool, totalProducts *int64) (int, error) {
 	// Fetch sitemap XML with rate limiting
 	xmlData, err := c.FetchXML(ctx, sitemapURL, workerPool.limiter)
 	if err != nil {
@@ -168,7 +168,7 @@ func (c *ContinenteScraper) processSitemap(ctx context.Context, sitemapURL strin
 
 			product, err := c.scrapeProductPage(ctx, productURL, workerPool.limiter)
 			if err != nil {
-				fmt.Printf("Warning: failed to scrape product %s: %v\n", productURL, err)
+				store.ProductFailed(productURL, err)
 				return nil
 			}
 
@@ -196,7 +196,7 @@ func (c *ContinenteScraper) processSitemap(ctx context.Context, sitemapURL strin
 }
 
 // scrapeProductPage scrapes a single product page with rate limiting
-func (c *ContinenteScraper) scrapeProductPage(ctx context.Context, productURL string, limiter *rate.Limiter) (*storage.Product, error) {
+func (c *ContinenteScraper) scrapeProductPage(ctx context.Context, productURL string, limiter *rate.Limiter) (*rawlog.Product, error) {
 	doc, err := c.FetchPage(ctx, productURL, limiter)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch product page: %w", err)
@@ -206,7 +206,7 @@ func (c *ContinenteScraper) scrapeProductPage(ctx context.Context, productURL st
 }
 
 // extractProductFromPage extracts product information from a product page
-func (c *ContinenteScraper) extractProductFromPage(doc *goquery.Document, productURL string) (*storage.Product, error) {
+func (c *ContinenteScraper) extractProductFromPage(doc *goquery.Document, productURL string) (*rawlog.Product, error) {
 	name := c.FindProductName(doc)
 	if name == "" {
 		return nil, fmt.Errorf("could not find product name")

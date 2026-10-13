@@ -13,7 +13,7 @@ import (
 	"strings"
 	"time"
 
-	storage "retail-prices/internal/scrape/rawlog"
+	"retail-prices/internal/scrape/rawlog"
 
 	"github.com/PuerkitoBio/goquery"
 	"golang.org/x/time/rate"
@@ -172,13 +172,13 @@ func (b *BaseScraper) CleanText(text string) string {
 }
 
 // CreateProduct creates a product with common fields filled
-func (b *BaseScraper) CreateProduct(name, priceStr, url string) (*storage.Product, error) {
+func (b *BaseScraper) CreateProduct(name, priceStr, url string) (*rawlog.Product, error) {
 	price, err := b.ParsePrice(priceStr)
 	if err != nil {
 		return nil, err
 	}
 
-	return &storage.Product{
+	return &rawlog.Product{
 		Store:     b.name,
 		Name:      b.CleanText(name),
 		Price:     price,

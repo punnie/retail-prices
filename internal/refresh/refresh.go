@@ -26,6 +26,7 @@ import (
 	"retail-prices/internal/db"
 	"retail-prices/internal/normalize"
 	"retail-prices/internal/quality"
+	"retail-prices/internal/retailer"
 )
 
 // A product is phantom if it was seen in a smaller share of the substantial
@@ -268,15 +269,9 @@ type rawRow struct {
 // scraped_at) directly — grouping by raw url instead would fragment a
 // product's history whenever a retailer regenerates its URL slug while
 // keeping the product id (Continente does this constantly: the same SKU
-// resurfaces under word-order permutations of its own slug). Keep this in
-// sync with the patterns in internal/normalize/normalize.go.
-const skuSQLExpr = `
-	CASE store
-		WHEN 'Auchan'      THEN substring(url from '/([0-9]+)\.html$')
-		WHEN 'Continente'  THEN substring(url from '-([0-9]+)\.html$')
-		WHEN 'Pingo Doce'  THEN substring(url from '-([0-9]+)\.html$')
-		WHEN 'Celeiro'     THEN substring(url from '\.pt/([0-9]+)-')
-	END`
+// resurfaces under word-order permutations of its own slug). Both come from
+// the patterns in internal/retailer.
+var skuSQLExpr = retailer.SKUSQLExpr()
 
 // refreshProducts streams the raw log ordered by (store, sku, scraped_at) on
 // one connection while a second connection performs the upserts and COPY

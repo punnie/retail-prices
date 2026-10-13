@@ -6,8 +6,9 @@ import (
 	"net/http"
 	"sync"
 
+	"retail-prices/internal/retailer"
 	"retail-prices/internal/scrape/config"
-	storage "retail-prices/internal/scrape/rawlog"
+	"retail-prices/internal/scrape/rawlog"
 
 	"golang.org/x/time/rate"
 )
@@ -19,75 +20,37 @@ type Scraper interface {
 
 	// ScrapeProducts scrapes products from the store using parallel workers,
 	// saving results to storage as they are scraped.
-	ScrapeProducts(cfg *config.Config, storage storage.Storage, limiter *rate.Limiter) error
+	ScrapeProducts(cfg *config.Config, sink rawlog.Sink, limiter *rate.Limiter) error
 
 	// SetHTTPClient allows setting a custom HTTP client
 	SetHTTPClient(client *http.Client)
 }
 
-// Manager manages multiple scrapers and coordinates scraping operations
-type Manager struct {
-	scrapers map[string]Scraper
-	storage  storage.Storage
-	client   *http.Client
-	config   *config.Config
-	limiter  *rate.Limiter
+// constructors maps each retailer id (internal/retailer) to its scraper.
+var constructors = map[string]func() Scraper{
+	"continente": func() Scraper { return NewContinenteScraper() },
+	"pingodoce":  func() Scraper { return NewPingoDoceScraper() },
+	"auchan":     func() Scraper { return NewAuchanScraper() },
+	"celeiro":    func() Scraper { return NewCeleiroScraper() },
 }
 
-// NewManager creates a new scraper manager
-func NewManager(storage storage.Storage, cfg *config.Config) *Manager {
-	client := &http.Client{
-		Timeout: cfg.HTTPTimeout,
+// Scrape runs the scraper for retailer r once, reporting every observation
+// and failure into sink. It returns an error only when the scrape could not
+// get going at all (for example, the sitemap index was unreachable);
+// individual failures are counted by the sink.
+func Scrape(r *retailer.Retailer, cfg *config.Config, sink rawlog.Sink) error {
+	newScraper, ok := constructors[r.ID]
+	if !ok {
+		return fmt.Errorf("no scraper registered for retailer %q", r.ID)
 	}
-
+	s := newScraper()
+	s.SetHTTPClient(&http.Client{Timeout: cfg.HTTPTimeout})
 	limiter := rate.NewLimiter(rate.Limit(cfg.RequestsPerSecond), 1)
 
-	return &Manager{
-		scrapers: make(map[string]Scraper),
-		storage:  storage,
-		client:   client,
-		config:   cfg,
-		limiter:  limiter,
-	}
-}
-
-// RegisterScraper registers a new scraper with the manager
-func (m *Manager) RegisterScraper(name string, scraper Scraper) {
-	scraper.SetHTTPClient(m.client)
-	m.scrapers[name] = scraper
-}
-
-// ScrapeStore scrapes a specific store using parallel workers
-func (m *Manager) ScrapeStore(storeName string) error {
-	scraper, exists := m.scrapers[storeName]
-	if !exists {
-		return fmt.Errorf("scraper for store '%s' not found", storeName)
-	}
-
 	fmt.Printf("Starting to scrape %s (parallel mode with %d workers)...\n",
-		scraper.GetName(), m.config.MaxConcurrentWorkers)
+		s.GetName(), cfg.MaxConcurrentWorkers)
 
-	return scraper.ScrapeProducts(m.config, m.storage, m.limiter)
-}
-
-// ScrapeAllStores scrapes all registered stores
-func (m *Manager) ScrapeAllStores() error {
-	for storeName := range m.scrapers {
-		if err := m.ScrapeStore(storeName); err != nil {
-			fmt.Printf("Error scraping %s: %v\n", storeName, err)
-			continue
-		}
-	}
-	return nil
-}
-
-// GetAvailableStores returns a list of available store names
-func (m *Manager) GetAvailableStores() []string {
-	stores := make([]string, 0, len(m.scrapers))
-	for name := range m.scrapers {
-		stores = append(stores, name)
-	}
-	return stores
+	return s.ScrapeProducts(cfg, sink, limiter)
 }
 
 // WorkerPool manages a pool of workers for parallel scraping

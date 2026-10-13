@@ -14,35 +14,23 @@ import (
 	"golang.org/x/text/runes"
 	"golang.org/x/text/transform"
 	"golang.org/x/text/unicode/norm"
+
+	"retail-prices/internal/retailer"
 )
 
 // --- SKU extraction ----------------------------------------------------------
 
-// skuPatterns captures the numeric product id embedded in each store's URL.
-// Auchan and Celeiro use the SKU as its own path segment; Continente and
-// Pingo Doce append it as a hyphenated suffix before ".html". Verified at
-// ~100% coverage over a 3% sample of the full log (see profile step 8).
-var skuPatterns = map[string]*regexp.Regexp{
-	"Auchan":     regexp.MustCompile(`/(\d+)\.html$`),
-	"Continente": regexp.MustCompile(`-(\d+)\.html$`),
-	"Pingo Doce": regexp.MustCompile(`-(\d+)\.html$`),
-	"Celeiro":    regexp.MustCompile(`\.pt/(\d+)-`),
-}
-
-// ExtractSKU recovers the retailer's own product id from a product URL. The
-// small fraction of Continente URLs that don't match are non-product pages
+// ExtractSKU recovers the retailer's own product id from a product URL, using
+// the pattern registered for that store in internal/retailer. The small
+// fraction of Continente URLs that don't match are non-product pages
 // (campaign/landing pages) that leaked into the sitemap scrape, not a parser
 // bug — ok=false for those is correct and should exclude the row.
 func ExtractSKU(store, url string) (sku string, ok bool) {
-	re, known := skuPatterns[store]
-	if !known {
+	r := retailer.ByName(store)
+	if r == nil {
 		return "", false
 	}
-	m := re.FindStringSubmatch(url)
-	if m == nil {
-		return "", false
-	}
-	return m[1], true
+	return r.ExtractSKU(url)
 }
 
 // --- Name/brand normalization -------------------------------------------------
