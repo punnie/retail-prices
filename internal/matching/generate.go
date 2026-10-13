@@ -5,13 +5,16 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"retail-prices/internal/db"
+	"retail-prices/internal/retailer"
 )
 
 // blockingReason records which signal produced a candidate, so a future
@@ -44,18 +47,62 @@ const progressEvery = 20000
 // polish.
 func Run(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("match", flag.ContinueOnError)
-	topN := fs.Int("top-n", 8, "candidate neighbours to consider per product")
-	simFloor := fs.Float64("sim-floor", 0.35, "name-similarity floor a candidate must clear to be scored at all (recall net, not the final score)")
-	minScore := fs.Float64("min-score", 0.3, "minimum combined Score to persist as a candidate")
-	workers := fs.Int("workers", 8, "products processed concurrently, each on its own connection (shards the catalogue by id)")
+	d := DefaultOptions
+	topN := fs.Int("top-n", d.TopN, "candidate neighbours to consider per product")
+	simFloor := fs.Float64("sim-floor", d.SimFloor, "name-similarity floor a candidate must clear to be scored at all (recall net, not the final score)")
+	minScore := fs.Float64("min-score", d.MinScore, "minimum combined Score to persist as a candidate")
+	workers := fs.Int("workers", d.Workers, "products processed concurrently, each on its own connection (shards the catalogue by id)")
+	storeID := fs.String("store", "", "only look for matches of this store's products ("+strings.Join(retailer.IDs(), ", ")+"); default: every store")
+	sinceStr := fs.String("since", "", "only look for matches of products first seen at or after this time (RFC 3339 or YYYY-MM-DD)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if *simFloor < 0 || *simFloor > 1 {
-		return fmt.Errorf("--sim-floor must be in [0,1], got %v", *simFloor)
+	var sc Scope
+	if *storeID != "" {
+		r, err := retailer.ByID(*storeID)
+		if err != nil {
+			return err
+		}
+		sc.Store = r.Name
 	}
-	if *workers < 1 {
-		return fmt.Errorf("--workers must be >= 1, got %d", *workers)
+	if *sinceStr != "" {
+		t, err := time.Parse(time.RFC3339, *sinceStr)
+		if err != nil {
+			if t, err = time.Parse(time.DateOnly, *sinceStr); err != nil {
+				return fmt.Errorf("--since must be RFC 3339 or YYYY-MM-DD: %w", err)
+			}
+		}
+		sc.Since = t
+	}
+	return Generate(ctx, sc, Options{TopN: *topN, SimFloor: *simFloor, MinScore: *minScore, Workers: *workers})
+}
+
+// Scope narrows which products Generate looks for matches of. The zero
+// Scope is the whole catalogue.
+type Scope struct {
+	Store string    // stored retailer name; "" for every store
+	Since time.Time // only products first seen at or after this; zero for all
+}
+
+func (sc Scope) whole() bool { return sc.Store == "" && sc.Since.IsZero() }
+
+// Options are Generate's tuning knobs; see the `retail match` flags.
+type Options struct {
+	TopN               int
+	SimFloor, MinScore float64
+	Workers            int
+}
+
+// DefaultOptions are the `retail match` flag defaults.
+var DefaultOptions = Options{TopN: 8, SimFloor: 0.35, MinScore: 0.3, Workers: 8}
+
+// Generate finds and scores match candidates for the products in scope.
+func Generate(ctx context.Context, sc Scope, o Options) error {
+	if o.SimFloor < 0 || o.SimFloor > 1 {
+		return fmt.Errorf("--sim-floor must be in [0,1], got %v", o.SimFloor)
+	}
+	if o.Workers < 1 {
+		return fmt.Errorf("--workers must be >= 1, got %d", o.Workers)
 	}
 
 	url, err := db.URL()
@@ -70,7 +117,7 @@ func Run(ctx context.Context, args []string) error {
 	// a CLI command makes, not --workers concurrent long-running ones —
 	// and each worker holds two connections at once (read + write, see
 	// runShard).
-	cfg.MaxConns = int32(*workers)*2 + 1
+	cfg.MaxConns = int32(o.Workers)*2 + 1
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
 		return fmt.Errorf("connecting to postgres: %w", err)
@@ -80,16 +127,28 @@ func Run(ctx context.Context, args []string) error {
 		return fmt.Errorf("pinging postgres: %w", err)
 	}
 
-	fmt.Fprintf(os.Stderr, "==> finding each product's %d nearest other-store neighbours by name (%d workers)\n", *topN, *workers)
+	scopeDesc := "each product's"
+	if !sc.whole() {
+		scopeDesc = "each"
+		if sc.Store != "" {
+			scopeDesc += " " + sc.Store
+		}
+		scopeDesc += " product"
+		if !sc.Since.IsZero() {
+			scopeDesc += " first seen since " + sc.Since.Format(time.RFC3339)
+		}
+		scopeDesc += "'s"
+	}
+	fmt.Fprintf(os.Stderr, "==> finding %s %d nearest other-store neighbours by name (%d workers)\n", scopeDesc, o.TopN, o.Workers)
 
 	var considered, kept int64
 	var wg sync.WaitGroup
-	errs := make([]error, *workers)
-	for shard := 0; shard < *workers; shard++ {
+	errs := make([]error, o.Workers)
+	for shard := 0; shard < o.Workers; shard++ {
 		wg.Add(1)
 		go func(shard int) {
 			defer wg.Done()
-			errs[shard] = runShard(ctx, pool, shard, *workers, *topN, *simFloor, *minScore, &considered, &kept)
+			errs[shard] = runShard(ctx, pool, sc, shard, o.Workers, o.TopN, o.SimFloor, o.MinScore, &considered, &kept)
 		}(shard)
 	}
 	wg.Wait()
@@ -100,14 +159,20 @@ func Run(ctx context.Context, args []string) error {
 	}
 
 	fmt.Fprintf(os.Stderr, "done: considered %d nearest-neighbour pairs, kept %d candidates (score >= %v)\n",
-		atomic.LoadInt64(&considered), atomic.LoadInt64(&kept), *minScore)
+		atomic.LoadInt64(&considered), atomic.LoadInt64(&kept), o.MinScore)
 	return nil
 }
 
 // runShard handles every anchor product whose id falls in one shard
 // (`id % totalShards == shard`) on its own connection, independently of
 // every other shard.
-func runShard(ctx context.Context, pool *pgxpool.Pool, shard, totalShards, topN int, simFloor, minScore float64, considered, kept *int64) error {
+//
+// Over the whole catalogue each pair is only generated from its lower-id
+// side (`a.id < c.id`), since the other side is an anchor too. A scoped run
+// can't rely on that — its anchors are mostly new, high-id products whose
+// neighbours are older — so it keeps pairs from either side and stores them
+// as (lower id, higher id), the same orientation a full run uses.
+func runShard(ctx context.Context, pool *pgxpool.Pool, sc Scope, shard, totalShards, topN int, simFloor, minScore float64, considered, kept *int64) error {
 	// Two connections, not one: a pgx connection can't run a write (the
 	// periodic upsert batch below) while a streaming Query's Rows on that
 	// same connection is still open — see the identical comment in
@@ -160,7 +225,11 @@ func runShard(ctx context.Context, pool *pgxpool.Pool, shard, totalShards, topN 
 		    ORDER BY b.name_norm <-> a.name_norm
 		    LIMIT $1
 		) c
-		WHERE NOT a.is_phantom AND a.id < c.id AND a.id % $2 = $3`, topN, totalShards, shard)
+		WHERE NOT a.is_phantom AND a.id % $2 = $3
+		  AND ($4::bool OR a.id < c.id)
+		  AND ($5 = '' OR a.store = $5)
+		  AND ($6::timestamptz IS NULL OR a.first_seen >= $6)`,
+		topN, totalShards, shard, !sc.whole(), sc.Store, sinceArg(sc.Since))
 	if err != nil {
 		return fmt.Errorf("shard %d: querying candidates: %w", shard, err)
 	}
@@ -212,6 +281,9 @@ func runShard(ctx context.Context, pool *pgxpool.Pool, shard, totalShards, topN 
 			continue
 		}
 		localKept++
+		if leftID > rightID {
+			leftID, rightID = rightID, leftID
+		}
 
 		batch.Queue(`
 			INSERT INTO match_candidates (left_product_id, right_product_id, score, blocking_reason)
@@ -236,6 +308,13 @@ func runShard(ctx context.Context, pool *pgxpool.Pool, shard, totalShards, topN 
 	atomic.AddInt64(considered, localConsidered)
 	atomic.AddInt64(kept, localKept)
 	return nil
+}
+
+func sinceArg(t time.Time) *time.Time {
+	if t.IsZero() {
+		return nil
+	}
+	return &t
 }
 
 func featuresFrom(brandNorm *string, packValue *float64, packUnit *string, baseline *float64) Features {

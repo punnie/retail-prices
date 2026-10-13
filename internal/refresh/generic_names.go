@@ -3,7 +3,7 @@ package refresh
 import (
 	"context"
 
-	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/jackc/pgx/v5"
 )
 
 // genericNameMinSKUs is the minimum number of distinct SKUs within one store
@@ -33,17 +33,18 @@ const genericNameMinSKUs = 50
 // its existing exclusions everywhere it's already checked (the catalogue,
 // cross-retailer matching), rather than adding a second flag. Nothing is
 // deleted; the rows and their full observation history stay queryable.
-func flagGenericNames(ctx context.Context, pool *pgxpool.Pool) error {
-	_, err := pool.Exec(ctx, `
+func flagGenericNames(ctx context.Context, tx pgx.Tx, store string) error {
+	_, err := tx.Exec(ctx, `
 		UPDATE retail_products rp
 		SET is_phantom = true
 		FROM (
 			SELECT store, name
 			FROM retail_products
+			WHERE store = $2
 			GROUP BY store, name
 			HAVING count(*) >= $1
 		) junk
 		WHERE rp.store = junk.store AND rp.name = junk.name AND NOT rp.is_phantom`,
-		genericNameMinSKUs)
+		genericNameMinSKUs, store)
 	return err
 }

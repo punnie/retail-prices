@@ -2,14 +2,21 @@
 // price_intervals, price_spells, regular_price_changes,
 // product_pricing_snapshot) from the raw products log.
 //
+// Everything it derives is partitioned by store, so a refresh runs one store
+// at a time, each inside a single transaction: readers (`retail serve`) keep
+// seeing the previous catalogue for that store until the new one commits,
+// and a refresh that fails part-way rolls back instead of leaving the store
+// half-rebuilt. `retail refresh --store <id>` rebuilds one store — what
+// `retail run` does after each scrape — and plain `retail refresh` rebuilds
+// every store in turn.
+//
 // retail_products is upserted by (store, sku) so its id — the join key used
 // by human-curated tables (match_decisions, product_group_members,
 // basket_items) — never changes across refreshes. The rest have no such
-// external references, so they're simply truncated and rebuilt in full each
-// run. There is no incremental watermarking yet: every refresh rescans the
-// whole raw log, which the profiler showed takes low minutes even at 28M
-// rows — a reasonable v1 trade-off given refreshes are periodic
-// (daily/hourly), not continuous.
+// external references, so a store's rows are simply deleted and rebuilt in
+// full each run. There is no incremental watermarking yet: every refresh
+// rescans the store's whole raw history, which the profiler showed takes low
+// minutes even for all 28M rows.
 package refresh
 
 import (
@@ -18,6 +25,7 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -48,13 +56,29 @@ const phantomMinObservations = 5
 // memory and are bulk-loaded via COPY every this many products.
 const flushEvery = 5000
 
+// lockKey serializes refreshes: each one sets work_mem to 512MB and scans a
+// store's whole history, so two at once (say, two retailers' scrapes ending
+// together) would only compete for the same memory and disk. The later one
+// waits for the earlier to commit.
+const lockKey = "retail-refresh"
+
 func Run(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("refresh", flag.ContinueOnError)
 	pricingOnly := fs.Bool("pricing-only", false,
 		"skip the raw-log rescan and only redo placeholder derivation + pricing analysis "+
 			"(phases B and C); use when only pricing_params or the classifier changed")
+	storeID := fs.String("store", "", "refresh only this store ("+strings.Join(retailer.IDs(), ", ")+"); default: every store")
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+
+	stores := retailer.All
+	if *storeID != "" {
+		r, err := retailer.ByID(*storeID)
+		if err != nil {
+			return err
+		}
+		stores = []*retailer.Retailer{r}
 	}
 
 	pool, err := db.Connect(ctx)
@@ -63,61 +87,114 @@ func Run(ctx context.Context, args []string) error {
 	}
 	defer pool.Close()
 
-	if *pricingOnly {
-		fmt.Fprintln(os.Stderr, "==> pricing-only: resetting derived pricing analysis")
-		if _, err := pool.Exec(ctx, "TRUNCATE price_spells, regular_price_changes, product_pricing_snapshot"); err != nil {
-			return err
+	for _, r := range stores {
+		if err := Store(ctx, pool, r.Name, *pricingOnly); err != nil {
+			return fmt.Errorf("refreshing %s: %w", r.Name, err)
 		}
-		if _, err := pool.Exec(ctx,
-			"UPDATE price_intervals SET is_suspect = false WHERE is_suspect"); err != nil {
-			return err
-		}
-		fmt.Fprintln(os.Stderr, "==> phase B: deriving store placeholder prices")
-		if err := refreshPlaceholders(ctx, pool); err != nil {
-			return fmt.Errorf("deriving placeholder prices: %w", err)
-		}
-		fmt.Fprintln(os.Stderr, "==> phase C: pricing analysis")
-		return classifyAll(ctx, pool)
 	}
+	return nil
+}
 
-	fmt.Fprintln(os.Stderr, "==> rebuilding scrape_runs")
-	if err := refreshScrapeRuns(ctx, pool); err != nil {
-		return fmt.Errorf("refreshing scrape_runs: %w", err)
-	}
-
-	runIdx, err := loadRunIndex(ctx, pool)
+// Store rebuilds one store's derived rows in a single transaction. With
+// pricingOnly it skips the raw-log rescan and only redoes placeholder
+// derivation and pricing analysis (phases B and C).
+func Store(ctx context.Context, pool *pgxpool.Pool, store string, pricingOnly bool) error {
+	started := time.Now()
+	tx, err := pool.Begin(ctx)
 	if err != nil {
-		return fmt.Errorf("loading run counts: %w", err)
+		return err
 	}
+	defer tx.Rollback(ctx) // no-op after Commit
 
-	fmt.Fprintln(os.Stderr, "==> truncating price_intervals, price_spells, regular_price_changes, product_pricing_snapshot")
-	if _, err := pool.Exec(ctx, "TRUNCATE price_intervals, price_spells, regular_price_changes, product_pricing_snapshot"); err != nil {
+	logf("==> %s: waiting for any other refresh to finish", store)
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, lockKey); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, "SET LOCAL work_mem = '512MB'"); err != nil {
 		return err
 	}
 
-	// Phase A builds the product dimension and the raw price series. Phase B
-	// then derives each store's placeholder prices, which needs the baselines
-	// Phase A computed — a price is only identifiable as filler by looking at
-	// whether the products wearing it normally cost anything like it. Phase C
-	// re-reads the (much smaller) interval series to flag outliers and run
-	// the spell decomposition with that store-level knowledge in hand.
-	fmt.Fprintln(os.Stderr, "==> phase A: raw products -> retail_products, price_intervals")
-	if err := refreshProducts(ctx, pool, runIdx); err != nil {
-		return err
+	if pricingOnly {
+		logf("==> %s: pricing-only: resetting derived pricing analysis", store)
+		if err := deletePricing(ctx, tx, store); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `
+			UPDATE price_intervals SET is_suspect = false
+			WHERE is_suspect AND retail_product_id IN (SELECT id FROM retail_products WHERE store = $1)`,
+			store); err != nil {
+			return err
+		}
+	} else {
+		logf("==> %s: rebuilding scrape_runs", store)
+		if err := refreshScrapeRuns(ctx, tx, store); err != nil {
+			return fmt.Errorf("refreshing scrape_runs: %w", err)
+		}
+
+		runIdx, err := loadRunIndex(ctx, tx, store)
+		if err != nil {
+			return fmt.Errorf("loading run counts: %w", err)
+		}
+
+		logf("==> %s: clearing price_intervals, price_spells, regular_price_changes, product_pricing_snapshot", store)
+		if err := deletePricing(ctx, tx, store); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `
+			DELETE FROM price_intervals
+			WHERE retail_product_id IN (SELECT id FROM retail_products WHERE store = $1)`, store); err != nil {
+			return err
+		}
+
+		// Phase A builds the product dimension and the raw price series.
+		// Phase B then derives the store's placeholder prices, which needs
+		// the baselines Phase A computed — a price is only identifiable as
+		// filler by looking at whether the products wearing it normally cost
+		// anything like it. Phase C re-reads the (much smaller) interval
+		// series to flag outliers and run the spell decomposition with that
+		// store-level knowledge in hand.
+		logf("==> %s: phase A: raw products -> retail_products, price_intervals", store)
+		if err := refreshProducts(ctx, pool, tx, store, runIdx); err != nil {
+			return err
+		}
+
+		logf("==> %s: flagging generic-name non-products", store)
+		if err := flagGenericNames(ctx, tx, store); err != nil {
+			return fmt.Errorf("flagging generic-name products: %w", err)
+		}
 	}
 
-	fmt.Fprintln(os.Stderr, "==> flagging generic-name non-products")
-	if err := flagGenericNames(ctx, pool); err != nil {
-		return fmt.Errorf("flagging generic-name products: %w", err)
-	}
-
-	fmt.Fprintln(os.Stderr, "==> phase B: deriving store placeholder prices")
-	if err := refreshPlaceholders(ctx, pool); err != nil {
+	logf("==> %s: phase B: deriving store placeholder prices", store)
+	if err := refreshPlaceholders(ctx, tx, store); err != nil {
 		return fmt.Errorf("deriving placeholder prices: %w", err)
 	}
 
-	fmt.Fprintln(os.Stderr, "==> phase C: pricing analysis")
-	return classifyAll(ctx, pool)
+	logf("==> %s: phase C: pricing analysis", store)
+	if err := classifyStore(ctx, tx, store); err != nil {
+		return err
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return err
+	}
+	logf("==> %s: refreshed in %s", store, time.Since(started).Round(time.Second))
+	return nil
+}
+
+// deletePricing removes a store's phase C output.
+func deletePricing(ctx context.Context, tx pgx.Tx, store string) error {
+	for _, table := range []string{"price_spells", "regular_price_changes", "product_pricing_snapshot"} {
+		if _, err := tx.Exec(ctx, `
+			DELETE FROM `+table+`
+			WHERE retail_product_id IN (SELECT id FROM retail_products WHERE store = $1)`, store); err != nil {
+			return fmt.Errorf("clearing %s: %w", table, err)
+		}
+	}
+	return nil
+}
+
+func logf(format string, args ...any) {
+	fmt.Fprintf(os.Stderr, format+"\n", args...)
 }
 
 // Placeholder-detection thresholds. A price must be used broadly enough to be
@@ -140,20 +217,12 @@ const (
 	placeholderMaxIntervalsPerProduct = 1.15
 )
 
-func refreshPlaceholders(ctx context.Context, pool *pgxpool.Pool) error {
-	conn, err := pool.Acquire(ctx)
-	if err != nil {
-		return err
-	}
-	defer conn.Release()
-	if _, err := conn.Exec(ctx, "SET work_mem = '512MB'"); err != nil {
-		return err
-	}
-	if _, err := conn.Exec(ctx, "TRUNCATE store_placeholder_prices"); err != nil {
+func refreshPlaceholders(ctx context.Context, tx pgx.Tx, store string) error {
+	if _, err := tx.Exec(ctx, "DELETE FROM store_placeholder_prices WHERE store = $1", store); err != nil {
 		return err
 	}
 
-	_, err = conn.Exec(ctx, `
+	_, err := tx.Exec(ctx, `
 		INSERT INTO store_placeholder_prices (store, price, products, near_baseline_pct)
 		SELECT store, price, products, near_pct
 		FROM (
@@ -166,27 +235,18 @@ func refreshPlaceholders(ctx context.Context, pool *pgxpool.Pool) error {
 			       count(*)::float8 / count(DISTINCT rp.id) AS intervals_per_product
 			FROM price_intervals pi
 			JOIN retail_products rp ON rp.id = pi.retail_product_id
-			WHERE rp.baseline_price > 0 AND pi.price > 0
+			WHERE rp.store = $4 AND rp.baseline_price > 0 AND pi.price > 0
 			GROUP BY rp.store, round(pi.price::numeric, 2)
 		) stats
 		WHERE products >= $1
 		  AND near_pct < $2
 		  AND intervals_per_product <= $3`,
-		placeholderMinProducts, placeholderMaxNearBasePct, placeholderMaxIntervalsPerProduct)
+		placeholderMinProducts, placeholderMaxNearBasePct, placeholderMaxIntervalsPerProduct, store)
 	return err
 }
 
-func refreshScrapeRuns(ctx context.Context, pool *pgxpool.Pool) error {
-	conn, err := pool.Acquire(ctx)
-	if err != nil {
-		return err
-	}
-	defer conn.Release()
-
-	if _, err := conn.Exec(ctx, "SET work_mem = '512MB'"); err != nil {
-		return err
-	}
-	if _, err := conn.Exec(ctx, "TRUNCATE scrape_runs"); err != nil {
+func refreshScrapeRuns(ctx context.Context, tx pgx.Tx, store string) error {
+	if _, err := tx.Exec(ctx, "DELETE FROM scrape_runs WHERE store = $1", store); err != nil {
 		return err
 	}
 
@@ -196,7 +256,7 @@ func refreshScrapeRuns(ctx context.Context, pool *pgxpool.Pool) error {
 	// run qualifies as complete — at 80% of max, Continente had 3 complete
 	// runs out of 288, which made the phantom-share denominator meaningless
 	// and let 3-observation products through as legitimately tracked.
-	_, err = conn.Exec(ctx, `
+	_, err := tx.Exec(ctx, `
 		WITH per_run AS (
 			SELECT store, run_id, count(*) AS n, min(scraped_at) AS run_started, max(scraped_at) AS run_ended
 			FROM (
@@ -207,6 +267,7 @@ func refreshScrapeRuns(ctx context.Context, pool *pgxpool.Pool) error {
 					SELECT store, scraped_at,
 					       scraped_at - lag(scraped_at) OVER (PARTITION BY store ORDER BY scraped_at) AS gap
 					FROM products
+					WHERE store = $1
 				) gapped
 			) tagged
 			GROUP BY store, run_id
@@ -219,7 +280,7 @@ func refreshScrapeRuns(ctx context.Context, pool *pgxpool.Pool) error {
 		       pr.n::float8 / sm.median_n AS completeness_ratio,
 		       pr.n::float8 / sm.median_n >= 0.5 AS is_complete
 		FROM per_run pr JOIN store_median sm ON sm.store = pr.store
-		WHERE sm.median_n > 0`)
+		WHERE sm.median_n > 0`, store)
 	return err
 }
 
@@ -238,9 +299,9 @@ func (ri runIndex) countBetween(store string, from, to time.Time) int {
 	return hi - lo
 }
 
-func loadRunIndex(ctx context.Context, pool *pgxpool.Pool) (runIndex, error) {
-	rows, err := pool.Query(ctx,
-		`SELECT store, run_started FROM scrape_runs WHERE is_complete ORDER BY store, run_started`)
+func loadRunIndex(ctx context.Context, tx pgx.Tx, store string) (runIndex, error) {
+	rows, err := tx.Query(ctx,
+		`SELECT store, run_started FROM scrape_runs WHERE is_complete AND store = $1 ORDER BY run_started`, store)
 	if err != nil {
 		return nil, err
 	}
@@ -273,11 +334,12 @@ type rawRow struct {
 // the patterns in internal/retailer.
 var skuSQLExpr = retailer.SKUSQLExpr()
 
-// refreshProducts streams the raw log ordered by (store, sku, scraped_at) on
-// one connection while a second connection performs the upserts and COPY
-// loads. These must be different connections: a pgx connection can't run a
-// write while a Query's Rows on that same connection are still open.
-func refreshProducts(ctx context.Context, pool *pgxpool.Pool, runIdx runIndex) error {
+// refreshProducts streams one store's raw log ordered by (sku, scraped_at)
+// on its own pooled connection while tx performs the upserts and COPY loads.
+// These must be different connections: a pgx connection can't run a write
+// while a Query's Rows on that same connection are still open. Reading
+// outside the transaction is safe because refresh never writes products.
+func refreshProducts(ctx context.Context, pool *pgxpool.Pool, tx pgx.Tx, store string, runIdx runIndex) error {
 	readConn, err := pool.Acquire(ctx)
 	if err != nil {
 		return err
@@ -286,12 +348,7 @@ func refreshProducts(ctx context.Context, pool *pgxpool.Pool, runIdx runIndex) e
 	if _, err := readConn.Exec(ctx, "SET work_mem = '512MB'"); err != nil {
 		return err
 	}
-
-	writeConn, err := pool.Acquire(ctx)
-	if err != nil {
-		return err
-	}
-	defer writeConn.Release()
+	writeConn := tx
 
 	rows, err := readConn.Query(ctx, `
 		SELECT store, sku, url, name,
@@ -300,10 +357,10 @@ func refreshProducts(ctx context.Context, pool *pgxpool.Pool, runIdx runIndex) e
 		FROM (
 			SELECT *, `+skuSQLExpr+` AS sku
 			FROM products
-			WHERE price > 0
+			WHERE store = $1 AND price > 0
 		) s
 		WHERE sku IS NOT NULL
-		ORDER BY store, sku, scraped_at`)
+		ORDER BY store, sku, scraped_at`, store)
 	if err != nil {
 		return err
 	}
@@ -402,7 +459,7 @@ func refreshProducts(ctx context.Context, pool *pgxpool.Pool, runIdx runIndex) e
 // and upserts it, returning the stable id. Rows with no extractable SKU (a
 // non-product page that leaked into the scrape, see profile step 8) are
 // already excluded upstream by the query's `WHERE sku IS NOT NULL`.
-func upsertRetailProduct(ctx context.Context, conn *pgxpool.Conn, store, sku string, group []rawRow, runIdx runIndex, baseline float64) (int64, error) {
+func upsertRetailProduct(ctx context.Context, conn pgx.Tx, store, sku string, group []rawRow, runIdx runIndex, baseline float64) (int64, error) {
 	last := group[len(group)-1]
 	firstSeen, lastSeen := group[0].scrapedAt, last.scrapedAt
 	observationCount := len(group)
