@@ -12,6 +12,22 @@
       nixpkgsFor = forAllSystems (system: import nixpkgs { inherit system; });
     in
     {
+      nixosModules.default = import ./nix/module.nix;
+
+      overlays.default = final: prev: {
+        retail-prices = final.callPackage ./nix/package.nix { };
+      };
+
+      packages = forAllSystems (system:
+        let
+          retail-prices = nixpkgsFor.${system}.callPackage ./nix/package.nix { };
+        in
+        {
+          default = retail-prices;
+          inherit retail-prices;
+        }
+      );
+
       devShells = forAllSystems (system:
         let
           pkgs = nixpkgsFor.${system};

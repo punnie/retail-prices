@@ -1,7 +1,7 @@
 # retail-prices
 
-A year of scraped prices from four Portuguese retailers (Continente, Pingo
-Doce, Auchan, Celeiro — see [`price-scraper`](https://github.com/punnie/price-scraper))
+Prices scraped from four Portuguese retailers (Continente, Pingo Doce,
+Auchan, Celeiro — see [`internal/scrape`](internal/scrape/README.md))
 turned into an observational product catalogue: product pages with full
 price history and a shape-based regular-price/promo decomposition (see
 `PRICING_CONCEPTS.md`), plus a human-reviewed backend for linking the same
@@ -39,17 +39,55 @@ db-restore /path/to/price_scraper-*.dump   # load the raw products table
 ## Commands
 
 ```sh
+go run ./cmd/retail run <store>     # scrape a retailer, then refresh and match its slice of the catalogue
+go run ./cmd/retail scrape <store>  # scrape only (see internal/scrape/README.md)
 go run ./cmd/retail profile   # read-only data-quality report over the raw log
-go run ./cmd/retail migrate   # apply derived-schema migrations
+go run ./cmd/retail migrate   # apply database migrations
 go run ./cmd/retail refresh   # rebuild retail_products, price_intervals, pricing analysis
 go run ./cmd/retail match     # generate cross-retailer match candidates for human review
 go run ./cmd/retail serve     # catalogue + product pages + matching review queue, on :8080
 go run ./cmd/retail admin login-link --name <you>   # one-time administrator sign-in link
 ```
 
-`refresh --pricing-only` skips the raw-log rescan and only redoes placeholder
-derivation + pricing analysis — use it after changing `pricing_params` or the
-classifier, without re-scanning 28M raw rows.
+Stores are `continente`, `pingodoce`, `auchan` and `celeiro`.
+
+`refresh` rebuilds one store at a time, each in its own transaction, so the
+site keeps showing a store's previous catalogue until its new one is ready.
+`refresh --store <store>` rebuilds just that store; `run` does that right
+after each scrape. `refresh --pricing-only` skips the raw-log rescan and only
+redoes placeholder derivation + pricing analysis — use it after changing
+`pricing_params` or the classifier, without re-scanning 28M raw rows.
+
+`match --store <store> --since <time>` only looks for matches of that store's
+products first seen since then; `run` uses it for each scrape's new products.
+
+Database tests run when `TEST_DATABASE_URL` points at a Postgres database
+they may create throwaway schemas in (`go test ./...` skips them otherwise).
+
+## Deploying on NixOS
+
+The flake provides `packages.default` (the `retail` binary),
+`overlays.default` and `nixosModules.default` (`services.retail-prices`). The
+module runs migrations, the web app, and one pipeline service plus timer per
+retailer, so each retailer's catalogue is refreshed as soon as its scrape
+ends. See [`nix/example.nix`](nix/example.nix).
+
+### Moving over from the price-scraper module
+
+The scraper used to be its own repository with its own NixOS module
+(`services.price-scraper`). To switch a host over:
+
+1. Check the live raw table with `\d products`; migration 008 only creates it
+   when it doesn't exist, so it never alters it.
+2. Back up the database (`pg_dump -Fc`).
+3. Disable `services.price-scraper` and enable `services.retail-prices` with
+   `DATABASE_URL` pointing at the same database. With peer authentication,
+   give the `retail-prices` user a role that owns or can write the tables.
+4. Copy `/var/lib/price-scraper/lastRun-*` into `/var/lib/retail-prices/`, so
+   each retailer's first scrape continues from where the old one stopped.
+5. Run `retail refresh` once, then start one pipeline by hand
+   (`systemctl start retail-prices-pipeline-celeiro`) and check the catalogue.
+6. Replace the `github:punnie/price-scraper` flake input with this repository.
 
 ## Roles and moderation
 
@@ -91,14 +129,19 @@ days on that device. Every decision records who made it
 ## Layout
 
 ```
-db/migrations/      derived-schema SQL, applied by `retail migrate`
+db/migrations/      schema SQL (raw log, scrape jobs, derived layer), applied by `retail migrate`
 cmd/retail/         CLI entrypoint
+nix/                Nix package and NixOS module
+internal/retailer/  the list of supported retailers: ids, stored names, SKU patterns
+internal/scrape/    per-retailer scrapers; rawlog/ writes the raw products log
+internal/pipeline/  `retail scrape` and `retail run`: scrape jobs, then refresh + match one store
+internal/testdb/    throwaway migrated schemas for database tests
 internal/db/        Postgres connection
 internal/profile/   raw-data profiling (`retail profile`)
 internal/normalize/ accents, pack sizes, unit prices, brands
 internal/quality/   interval construction + per-product baseline/placeholder quarantine
 internal/pricing/   regular price / promo / average-paid decomposition (see PRICING_CONCEPTS.md)
-internal/refresh/   the `retail refresh` pipeline: raw log -> retail_products -> pricing analysis
+internal/refresh/   the `retail refresh` pipeline: raw log -> retail_products -> pricing analysis, per store
 internal/matching/  cross-retailer candidate scoring + generation (`retail match`)
 internal/auth/      administrator sign-in links and sessions, guest identity, rate limiting
 internal/web/       catalogue, product pages, linking + moderation (`retail serve`)
