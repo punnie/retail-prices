@@ -11,6 +11,7 @@
 # Build artifacts
 /result
 /retail
+/price-scraper
 cmd/retail/retail
 
 # Generated output

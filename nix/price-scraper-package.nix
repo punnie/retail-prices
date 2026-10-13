@@ -1,0 +1,45 @@
+# Legacy nix compatibility - allows importing with `import ./. {}`
+{ pkgs ? import <nixpkgs> {}
+, lib ? pkgs.lib
+}:
+
+pkgs.buildGoModule rec {
+  pname = "price-scraper";
+  version = "0.4.0";
+
+  src = pkgs.lib.cleanSourceWith {
+    src = ./.;
+    filter = path: type:
+      let
+        baseName = baseNameOf path;
+      in
+      # Exclude test files that have main functions
+      !(pkgs.lib.hasSuffix "test_streaming.go" baseName);
+  };
+
+  vendorHash = "sha256-Yy+y3nikS9majeaEsuUHDTSpcW5H0mhntVfUI3yBnYU=";
+
+  # Build flags
+  ldflags = [
+    "-s"
+    "-w"
+    "-X main.version=${version}"
+  ];
+
+  # Runtime dependencies
+  buildInputs = with pkgs; [
+    sqlite
+  ];
+
+  # Ensure CGO is enabled for sqlite3
+  env.CGO_ENABLED = "1";
+
+  meta = with pkgs.lib; {
+    description = "Portuguese retailers price scraper";
+    homepage = "https://github.com/punnie/price-scraper";
+    license = licenses.mit; # Adjust if different
+    maintainers = [ ];
+    platforms = platforms.unix;
+    mainProgram = "price-scraper";
+  };
+}
