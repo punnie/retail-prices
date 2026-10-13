@@ -6,12 +6,12 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
-	"os"
 	"strconv"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"retail-prices/internal/auth"
 	"retail-prices/internal/normalize"
 )
 
@@ -30,16 +30,23 @@ type candidateRow struct {
 	CandidateID int64
 	Score       float64
 	Left, Right matchSide
+	// Pending guest proposals on this pair, shown to administrators.
+	ProposedLink, ProposedNotMatch int
 }
 
 // loadCandidates returns undecided match_candidates ordered by score —
 // human-confirmed decisions (match_decisions) are the only thing that ever
-// resolves one; nothing here matches automatically.
-func loadCandidates(ctx context.Context, pool *pgxpool.Pool, limit int) ([]candidateRow, error) {
+// resolves one; nothing here matches automatically. Pairs the given guest
+// already has a pending proposal on are skipped, so they see fresh ones.
+func loadCandidates(ctx context.Context, pool *pgxpool.Pool, contributorID string, limit int) ([]candidateRow, error) {
 	rows, err := pool.Query(ctx, `
 		SELECT mc.id, mc.score,
 		       a.id, a.store, a.name, coalesce(a.brand,''), coalesce(a.image_url,''), a.url, coalesce(pa.current_price,0), pa.current_price IS NOT NULL,
-		       b.id, b.store, b.name, coalesce(b.brand,''), coalesce(b.image_url,''), b.url, coalesce(pb.current_price,0), pb.current_price IS NOT NULL
+		       b.id, b.store, b.name, coalesce(b.brand,''), coalesce(b.image_url,''), b.url, coalesce(pb.current_price,0), pb.current_price IS NOT NULL,
+		       (SELECT count(*) FROM contributions c WHERE c.status = 'pending' AND c.kind = 'link'
+		            AND c.left_product_id = mc.left_product_id AND c.right_product_id = mc.right_product_id),
+		       (SELECT count(*) FROM contributions c WHERE c.status = 'pending' AND c.kind = 'not_match'
+		            AND c.left_product_id = mc.left_product_id AND c.right_product_id = mc.right_product_id)
 		FROM match_candidates mc
 		JOIN retail_products a ON a.id = mc.left_product_id
 		JOIN retail_products b ON b.id = mc.right_product_id
@@ -49,8 +56,13 @@ func loadCandidates(ctx context.Context, pool *pgxpool.Pool, limit int) ([]candi
 			SELECT 1 FROM match_decisions d
 			WHERE d.left_product_id = mc.left_product_id AND d.right_product_id = mc.right_product_id
 		)
+		  AND ($1 = '' OR NOT EXISTS (
+			SELECT 1 FROM contributions c
+			WHERE c.contributor_id = $1 AND c.status = 'pending'
+			  AND c.left_product_id = mc.left_product_id AND c.right_product_id = mc.right_product_id
+		))
 		ORDER BY mc.score DESC
-		LIMIT $1`, limit)
+		LIMIT $2`, contributorID, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -61,7 +73,8 @@ func loadCandidates(ctx context.Context, pool *pgxpool.Pool, limit int) ([]candi
 		var c candidateRow
 		if err := rows.Scan(&c.CandidateID, &c.Score,
 			&c.Left.ID, &c.Left.Store, &c.Left.Name, &c.Left.Brand, &c.Left.ImageURL, &c.Left.URL, &c.Left.Price, &c.Left.HasPrice,
-			&c.Right.ID, &c.Right.Store, &c.Right.Name, &c.Right.Brand, &c.Right.ImageURL, &c.Right.URL, &c.Right.Price, &c.Right.HasPrice); err != nil {
+			&c.Right.ID, &c.Right.Store, &c.Right.Name, &c.Right.Brand, &c.Right.ImageURL, &c.Right.URL, &c.Right.Price, &c.Right.HasPrice,
+			&c.ProposedLink, &c.ProposedNotMatch); err != nil {
 			return nil, err
 		}
 		out = append(out, c)
@@ -74,46 +87,6 @@ func loadCandidates(ctx context.Context, pool *pgxpool.Pool, limit int) ([]candi
 type linkError string
 
 func (e linkError) Error() string { return string(e) }
-
-// decideMatch records a human decision and, on confirm, links the two
-// products into one product_group — extending an existing group if either
-// side already belongs to one. Ids are put in left<right order first, the
-// convention match_decisions and match_candidates share, so a pair decided
-// from either side (or manually) resolves the same queue row.
-func decideMatch(ctx context.Context, pool *pgxpool.Pool, leftID, rightID int64, matched bool) error {
-	if leftID == rightID {
-		return linkError("a product can't be linked to itself")
-	}
-	if leftID > rightID {
-		leftID, rightID = rightID, leftID
-	}
-	decision := "rejected"
-	if matched {
-		decision = "matched"
-	}
-
-	tx, err := pool.Begin(ctx)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback(ctx)
-
-	if matched {
-		if err := linkIntoGroup(ctx, tx, leftID, rightID); err != nil {
-			return err
-		}
-	}
-
-	if _, err := tx.Exec(ctx, `
-		INSERT INTO match_decisions (left_product_id, right_product_id, decision)
-		VALUES ($1, $2, $3)
-		ON CONFLICT (left_product_id, right_product_id) DO UPDATE SET decision = EXCLUDED.decision, decided_at = now()`,
-		leftID, rightID, decision); err != nil {
-		return err
-	}
-
-	return tx.Commit(ctx)
-}
 
 // linkIntoGroup puts both products in one group, creating it or extending
 // whichever group either already belongs to. It refuses (rather than
@@ -233,22 +206,34 @@ func searchLinkOptions(ctx context.Context, pool *pgxpool.Pool, q string, limit 
 }
 
 type matchView struct {
-	Title      string
+	page
 	Candidates []candidateRow
 }
 
+const queueSize = 50
+
 func (s *server) handleMatchQueue(w http.ResponseWriter, r *http.Request) {
-	candidates, err := loadCandidates(r.Context(), s.pool, 50)
+	v := auth.ViewerFrom(r.Context())
+	contributor := ""
+	if !v.Admin {
+		contributor = v.ContributorID
+	}
+	candidates, err := loadCandidates(r.Context(), s.pool, contributor, queueSize)
 	if err != nil {
 		httpError(w, err)
 		return
 	}
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	if err := matchTmpl.ExecuteTemplate(w, "layout", matchView{Title: "Linking queue", Candidates: candidates}); err != nil {
+	p, err := s.newPage(r, "Suggestions")
+	if err != nil {
 		httpError(w, err)
+		return
 	}
+	s.render(w, http.StatusOK, matchTmpl, matchView{page: p, Candidates: candidates})
 }
 
+// handleMatchDecide is "Same product" / "Not a match" on a suggestion: an
+// administrator's decision applies immediately, a guest's becomes a
+// proposal in the moderation queue.
 func (s *server) handleMatchDecide(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseForm(); err != nil {
 		http.Error(w, "bad form", http.StatusBadRequest)
@@ -262,10 +247,19 @@ func (s *server) handleMatchDecide(w http.ResponseWriter, r *http.Request) {
 	}
 	matched := r.FormValue("decision") == "matched"
 
-	if err := decideMatch(r.Context(), s.pool, leftID, rightID, matched); err != nil {
+	v := auth.ViewerFrom(r.Context())
+	if !v.Admin {
+		kind := kindNotMatch
+		if matched {
+			kind = kindLink
+		}
+		s.guestDone(w, r, s.submitContribution(w, r, kind, leftID, rightID), "/match")
+		return
+	}
+	if err := s.decideMatch(r.Context(), leftID, rightID, matched, v.DecidedBy()); err != nil {
 		var le linkError
 		if errors.As(err, &le) {
-			http.Error(w, string(le), http.StatusConflict)
+			s.renderMessage(w, r, http.StatusConflict, "Couldn't record that", string(le), "/match")
 			return
 		}
 		httpError(w, fmt.Errorf("recording decision: %w", err))
@@ -286,7 +280,7 @@ type manualSide struct {
 }
 
 type manualView struct {
-	Title string
+	page
 	A, B  manualSide
 	Error string
 }
@@ -322,9 +316,13 @@ func (s *server) buildManualSide(ctx context.Context, field, q, selected string)
 
 // buildManualView assembles the manual-link page from the request's
 // selections (a, b) and searches (qa, qb).
-func (s *server) buildManualView(ctx context.Context, vals map[string]string) (manualView, error) {
-	v := manualView{Title: "Link products manually"}
-	var err error
+func (s *server) buildManualView(r *http.Request, vals map[string]string) (manualView, error) {
+	ctx := r.Context()
+	p, err := s.newPage(r, "Link products")
+	if err != nil {
+		return manualView{}, err
+	}
+	v := manualView{page: p}
 	if v.A, err = s.buildManualSide(ctx, "a", vals["qa"], vals["a"]); err != nil {
 		return v, err
 	}
@@ -342,12 +340,12 @@ func (s *server) handleManualLink(w http.ResponseWriter, r *http.Request) {
 			vals["qb"] = p.Name
 		}
 	}
-	v, err := s.buildManualView(r.Context(), vals)
+	v, err := s.buildManualView(r, vals)
 	if err != nil {
 		httpError(w, err)
 		return
 	}
-	s.renderManual(w, v, http.StatusOK)
+	s.render(w, http.StatusOK, manualTmpl, v)
 }
 
 func (s *server) handleManualLinkPost(w http.ResponseWriter, r *http.Request) {
@@ -357,34 +355,35 @@ func (s *server) handleManualLinkPost(w http.ResponseWriter, r *http.Request) {
 	}
 	a, err1 := strconv.ParseInt(r.FormValue("a"), 10, 64)
 	b, err2 := strconv.ParseInt(r.FormValue("b"), 10, 64)
+	v := auth.ViewerFrom(r.Context())
 	var err error
-	if err1 != nil || err2 != nil {
+	switch {
+	case err1 != nil || err2 != nil:
 		err = linkError("pick one product on each side first")
-	} else if err = decideMatch(r.Context(), s.pool, a, b, true); err == nil {
-		http.Redirect(w, r, "/products/"+strconv.FormatInt(a, 10), http.StatusSeeOther)
-		return
+	case !v.Admin:
+		if err = s.submitContribution(w, r, kindLink, a, b); err == nil || errors.Is(err, errRateLimited) {
+			s.guestDone(w, r, err, "/products/"+strconv.FormatInt(a, 10))
+			return
+		}
+	default:
+		if err = s.decideMatch(r.Context(), a, b, true, v.DecidedBy()); err == nil {
+			http.Redirect(w, r, withFlash("/products/"+strconv.FormatInt(a, 10), flashLinked), http.StatusSeeOther)
+			return
+		}
 	}
 	var le linkError
 	if !errors.As(err, &le) {
 		httpError(w, fmt.Errorf("recording manual link: %w", err))
 		return
 	}
-	v, verr := s.buildManualView(r.Context(), map[string]string{
+	view, verr := s.buildManualView(r, map[string]string{
 		"a": r.FormValue("a"), "b": r.FormValue("b"), "qa": r.FormValue("qa"), "qb": r.FormValue("qb")})
 	if verr != nil {
 		httpError(w, verr)
 		return
 	}
-	v.Error = string(le)
-	s.renderManual(w, v, http.StatusConflict)
-}
-
-func (s *server) renderManual(w http.ResponseWriter, v manualView, status int) {
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.WriteHeader(status)
-	if err := manualTmpl.ExecuteTemplate(w, "layout", v); err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-	}
+	view.Error = string(le)
+	s.render(w, http.StatusConflict, manualTmpl, view)
 }
 
 // bulkRow is one pair on the bulk review page.
@@ -471,7 +470,7 @@ const (
 )
 
 type bulkView struct {
-	Title    string
+	page
 	Min      float64
 	Size     int
 	Rows     []bulkRow
@@ -483,7 +482,12 @@ type bulkView struct {
 
 func (s *server) handleBulkReview(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
-	v := bulkView{Title: "Bulk review", Min: bulkDefaultMin, Size: bulkDefaultSize}
+	p, err := s.newPage(r, "Bulk review")
+	if err != nil {
+		httpError(w, err)
+		return
+	}
+	v := bulkView{page: p, Min: bulkDefaultMin, Size: bulkDefaultSize}
 	if f, err := strconv.ParseFloat(q.Get("min"), 64); err == nil && f > 0 && f <= 1 {
 		v.Min = f
 	}
@@ -502,10 +506,7 @@ func (s *server) handleBulkReview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	v.Rows = rows
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	if err := bulkTmpl.ExecuteTemplate(w, "layout", v); err != nil {
-		httpError(w, err)
-	}
+	s.render(w, http.StatusOK, bulkTmpl, v)
 }
 
 // handleBulkDecide records one decision per pair shown on the page: ticked
@@ -522,6 +523,7 @@ func (s *server) handleBulkDecide(w http.ResponseWriter, r *http.Request) {
 	for _, p := range r.Form["ok"] {
 		ok[p] = true
 	}
+	decidedBy := auth.ViewerFrom(r.Context()).DecidedBy()
 	var matched, rejected, failed int
 	for _, p := range r.Form["pair"] {
 		var l, rt int64
@@ -529,7 +531,7 @@ func (s *server) handleBulkDecide(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "bad pair "+p, http.StatusBadRequest)
 			return
 		}
-		err := decideMatch(r.Context(), s.pool, l, rt, ok[p])
+		err := s.decideMatch(r.Context(), l, rt, ok[p], decidedBy)
 		var le linkError
 		switch {
 		case errors.As(err, &le):

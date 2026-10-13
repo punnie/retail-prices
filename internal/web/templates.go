@@ -142,6 +142,32 @@ const styleBlock = `
   table.bulk input[type=checkbox] { width: 18px; height: 18px; }
   .bulk-bar { position: sticky; bottom: 0; background: #f9f9f7; border-top: 1px solid #e4e3de; padding: 0.8rem 0; display: flex; gap: 1rem; align-items: center; }
   .bulk-bar button.confirm { padding: 0.5rem 1.2rem; border-radius: 6px; border: 1px solid #0ca30c; background: #0ca30c; color: #fff; cursor: pointer; }
+  .hp { position: absolute; left: -10000px; width: 1px; height: 1px; overflow: hidden; }
+  header nav .count { display: inline-block; min-width: 1.2em; padding: 0 0.35em; border-radius: 9px; background: #d03b3b; color: #fff; font-size: 0.72rem; text-align: center; }
+  header form.signout { margin-left: auto; font-size: 0.85rem; }
+  header form.signout button { padding: 0.25rem 0.6rem; border: 1px solid #c3c2b7; border-radius: 6px; background: #fff; cursor: pointer; }
+  .guestfields { display: flex; flex-wrap: wrap; gap: 0.5rem; margin: 0.4rem 0; }
+  .guestfields input { flex: 1 1 14rem; padding: 0.4rem 0.6rem; border: 1px solid #c3c2b7; border-radius: 6px; font-size: 0.85rem; }
+  details.report summary { cursor: pointer; color: #d03b3b; font-size: 0.82rem; list-style: none; }
+  details.report summary::-webkit-details-marker { display: none; }
+  details.report form { margin-top: 0.4rem; }
+  button.small { padding: 0.25rem 0.6rem; border-radius: 6px; border: 1px solid #c3c2b7; background: #fff; cursor: pointer; font-size: 0.82rem; }
+  button.small.danger { color: #d03b3b; border-color: #d03b3b; }
+  .proposals { font-size: 0.78rem; color: #52514e; }
+  .mod-card { border: 1px solid #e4e3de; border-radius: 8px; padding: 0.8rem; margin-bottom: 0.9rem; background: #fcfcfb; }
+  .mod-card .pair { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin: 0.6rem 0; }
+  .mod-card .side { display: flex; gap: 0.7rem; align-items: center; }
+  .mod-card .meta { font-size: 0.82rem; color: #52514e; }
+  .mod-card .notes { margin: 0.4rem 0; padding-left: 1.1rem; font-size: 0.88rem; }
+  .mod-card .actions { display: flex; gap: 0.5rem; flex-wrap: wrap; }
+  .mod-card .actions button { padding: 0.4rem 0.8rem; border-radius: 6px; border: 1px solid #c3c2b7; background: #fff; cursor: pointer; }
+  .mod-card .actions button.confirm { background: #0ca30c; color: #fff; border-color: #0ca30c; }
+  .mod-card .actions button.reject { color: #d03b3b; border-color: #d03b3b; }
+  .kind-tag { display: inline-block; padding: 0.05rem 0.5rem; border-radius: 4px; font-size: 0.78rem; font-weight: 600; background: #eef1fb; color: #2457c5; }
+  .kind-tag.unlink, .kind-tag.not_match { background: rgba(208,59,59,0.1); color: #b02d2d; }
+  .tabs { display: flex; gap: 1rem; margin: 0.8rem 0; font-size: 0.9rem; }
+  .tabs a.active { font-weight: 600; color: #0b0b0b; text-decoration: none; }
+  @media (max-width: 700px) { .mod-card .pair { grid-template-columns: 1fr; } }
   .notice { background: #eef1fb; border-left: 3px solid #2457c5; padding: 0.6rem 0.9rem; border-radius: 4px; margin: 1rem 0; }
 </style>`
 
@@ -152,13 +178,29 @@ var tmpl = template.Must(template.New("web").Funcs(funcs).Parse(`
 <body>
 <header>
   <a href="/">Retail prices</a>
-  <nav><a href="/products">Catalogue</a><a href="/match">Linking queue</a><a href="/match/manual">Link manually</a></nav>
+  <nav>
+    <a href="/products">Catalogue</a><a href="/match">Suggestions</a><a href="/match/manual">Link products</a>
+    {{if .Viewer.Admin}}<a href="/match/bulk">Bulk review</a><a href="/admin/moderation">Moderation{{if .Pending}} <span class="count">{{.Pending}}</span>{{end}}</a>{{end}}
+  </nav>
+  {{if .Viewer.Admin}}<form class="signout" method="post" action="/admin/logout"><span class="muted">{{.Viewer.AdminName}}</span> <button type="submit">Sign out</button></form>{{end}}
 </header>
+{{with .Flash}}<div class="notice">{{.}}</div>{{end}}
 {{block "content" .}}{{end}}
 </body>
 </html>{{end}}
 
 {{define "content"}}{{end}}
+
+{{/* Fields every guest submission form carries: an optional name and note,
+     and a honeypot that people never see but form-filling bots do. */}}
+{{define "honeypot"}}<label class="hp" aria-hidden="true">Website <input type="text" name="website" tabindex="-1" autocomplete="off"></label>{{end}}
+{{define "guestfields"}}
+<div class="guestfields">
+  <input type="text" name="note" maxlength="500" placeholder="Anything the moderator should know? (optional)">
+  <input type="text" name="name" maxlength="40" placeholder="Your name (optional)">
+  {{template "honeypot"}}
+</div>
+{{end}}
 `))
 
 // catalogueTmpl, productTmpl and matchTmpl are parsed separately (rather than
@@ -276,7 +318,7 @@ var productTmpl = template.Must(template.Must(tmpl.Clone()).Parse(`
 {{if .Siblings}}
 <h2>Linked listings</h2>
 <table>
-<thead><tr><th>Store</th><th>Listing</th><th>Price</th><th>Last observed</th></tr></thead>
+<thead><tr><th>Store</th><th>Listing</th><th>Price</th><th>Last observed</th><th></th></tr></thead>
 <tbody>
 {{range .Siblings}}
 <tr>
@@ -284,6 +326,26 @@ var productTmpl = template.Must(template.Must(tmpl.Clone()).Parse(`
   <td><a href="/products/{{.ID}}">{{.Name}}</a> <span class="muted">SKU {{.SKU}}</span></td>
   <td>{{if .HasSnapshot}}{{moneyF .CurrentPrice}}{{else}}&mdash;{{end}}</td>
   <td>{{.LastSeen.Format "2006-01-02"}}</td>
+  <td>
+  {{if $.Viewer.Admin}}
+    <form method="post" action="/products/{{$.Product.ID}}/report">
+      <input type="hidden" name="sibling" value="{{.ID}}">
+      <button class="small danger" type="submit">Unlink</button>
+    </form>
+    {{if .Reported}}<span class="muted proposals">reported by a guest</span>{{end}}
+  {{else if .Reported}}
+    <span class="muted proposals">reported, under review</span>
+  {{else}}
+    <details class="report">
+      <summary>This link is wrong</summary>
+      <form method="post" action="/products/{{$.Product.ID}}/report">
+        <input type="hidden" name="sibling" value="{{.ID}}">
+        {{template "guestfields"}}
+        <button class="small danger" type="submit">Report wrong link</button>
+      </form>
+    </details>
+  {{end}}
+  </td>
 </tr>
 {{end}}
 </tbody>
@@ -300,8 +362,12 @@ var productTmpl = template.Must(template.Must(tmpl.Clone()).Parse(`
 
 var matchTmpl = template.Must(template.Must(tmpl.Clone()).Parse(`
 {{define "content"}}
-<h1>Cross-retailer linking queue</h1>
+<h1>Suggested links</h1>
+{{if .Viewer.Admin}}
 <p class="muted">Suggested pairs from name/brand/pack-size matching, ranked by score. Nothing links automatically &mdash; confirm or reject each one. Many high-scoring pairs? <a href="/match/bulk">Review them in bulk</a>. Missing a pair? <a href="/match/manual">Link products manually</a>.</p>
+{{else}}
+<p class="muted">Help connect the same product across supermarkets, so prices can be compared. These pairs were suggested automatically from their names and pack sizes. Open the product pages if you're unsure, then tell us whether they're the same product. A moderator reviews every answer before it appears on the site. Know a pair that's missing? <a href="/match/manual">Suggest a link</a>.</p>
+{{end}}
 {{if .Candidates}}
 {{range .Candidates}}
 <div class="candidate">
@@ -313,7 +379,7 @@ var matchTmpl = template.Must(template.Must(tmpl.Clone()).Parse(`
     {{if .Left.HasPrice}}{{moneyF .Left.Price}} &middot; {{end}}<a href="/products/{{.Left.ID}}" target="_blank">product page</a> &middot; <a href="{{.Left.URL}}" target="_blank" rel="noopener">on {{.Left.Store}} &nearr;</a>
     </div>
   </div>
-  <div class="score">{{printf "%.2f" .Score}}</div>
+  <div class="score">{{printf "%.2f" .Score}}{{if $.Viewer.Admin}}{{if or .ProposedLink .ProposedNotMatch}}<div class="proposals">guests: {{.ProposedLink}} same, {{.ProposedNotMatch}} not</div>{{end}}{{end}}</div>
   <div class="side">
     {{if .Right.ImageURL}}<img class="thumb" src="{{imgSrc .Right.ImageURL}}" alt="" loading="lazy">{{end}}
     <div>
@@ -327,19 +393,22 @@ var matchTmpl = template.Must(template.Must(tmpl.Clone()).Parse(`
       <input type="hidden" name="left" value="{{.Left.ID}}">
       <input type="hidden" name="right" value="{{.Right.ID}}">
       <input type="hidden" name="decision" value="matched">
+      {{if not $.Viewer.Admin}}{{template "honeypot"}}{{end}}
       <button class="confirm" type="submit">Same product</button>
     </form>
     <form method="post" action="/match/decide">
       <input type="hidden" name="left" value="{{.Left.ID}}">
       <input type="hidden" name="right" value="{{.Right.ID}}">
       <input type="hidden" name="decision" value="rejected">
+      {{if not $.Viewer.Admin}}{{template "honeypot"}}{{end}}
       <button class="reject" type="submit">Not a match</button>
     </form>
   </div>
 </div>
 {{end}}
 {{else}}
-<p class="empty">No pending candidates &mdash; run <code>retail match</code> to generate more.</p>
+{{if .Viewer.Admin}}<p class="empty">No pending candidates &mdash; run <code>retail match</code> to generate more.</p>
+{{else}}<p class="empty">Nothing left to review right now. Thank you!</p>{{end}}
 {{end}}
 {{end}}
 `))
@@ -369,17 +438,18 @@ var manualTmpl = template.Must(template.Must(tmpl.Clone()).Parse(`
 {{end}}
 
 {{define "content"}}
-<h1>Link products manually</h1>
-<p class="muted">For pairs the suggestion queue missed. Search each side, pick one product from each, and confirm. Both can be from the same retailer &mdash; for an item relisted under a new SKU.</p>
+<h1>{{if .Viewer.Admin}}Link products manually{{else}}Suggest a link{{end}}</h1>
+<p class="muted">For pairs the suggestions missed. Search each side, pick one product from each, and confirm. Both can be from the same retailer &mdash; for an item relisted under a new SKU.{{if not .Viewer.Admin}} A moderator reviews every suggestion before it appears on the site.{{end}}</p>
 {{if .Error}}<div class="error">{{.Error}}</div>{{end}}
 <form method="get" action="/match/manual">
   <div class="manual">
     {{template "side" (dict "Title" "Product" "S" .A)}}
     {{template "side" (dict "Title" "Same product (another retailer, or a relisting)" "S" .B)}}
   </div>
+  {{if not .Viewer.Admin}}{{template "guestfields"}}{{end}}
   <div class="manual-actions">
     <button type="submit">Search</button>
-    <button type="submit" formmethod="post" formaction="/match/manual">Same product &mdash; link them</button>
+    <button type="submit" formmethod="post" formaction="/match/manual">{{if .Viewer.Admin}}Same product &mdash; link them{{else}}Suggest: same product{{end}}</button>
   </div>
 </form>
 {{end}}
@@ -431,6 +501,78 @@ document.querySelectorAll("tr.pair").forEach(function (tr) {
 </script>
 {{else}}
 <p class="empty">No undecided pairs at this score pass the bulk checks. Lower the min score, or use the <a href="/match">one-at-a-time queue</a>.</p>
+{{end}}
+{{end}}
+`))
+
+var messageTmpl = template.Must(template.Must(tmpl.Clone()).Parse(`
+{{define "content"}}
+<h1>{{.Heading}}</h1>
+<p>{{.Body}}</p>
+{{with .Back}}<p><a href="{{.}}">&larr; Back</a></p>{{end}}
+{{end}}
+`))
+
+var loginTmpl = template.Must(template.Must(tmpl.Clone()).Parse(`
+{{define "content"}}
+<h1>Administrator sign-in</h1>
+{{if .Error}}
+<div class="error">{{.Error}}</div>
+{{else}}
+<p>This single-use link signs you in as <strong>{{.Name}}</strong> on this device for 30 days.</p>
+<form method="post" action="/admin/login">
+  <input type="hidden" name="token" value="{{.Token}}">
+  <div class="manual-actions"><button type="submit">Sign in as {{.Name}}</button></div>
+</form>
+{{end}}
+{{end}}
+`))
+
+var moderationTmpl = template.Must(template.Must(tmpl.Clone()).Parse(`
+{{define "mside"}}
+<div class="side">
+  {{if .ImageURL}}<img class="thumb" src="{{imgSrc .ImageURL}}" alt="" loading="lazy">{{end}}
+  <div>
+    <span class="store-tag">{{.Store}}</span> <a href="/products/{{.ID}}" target="_blank"><strong>{{.Name}}</strong></a>{{if .Brand}} <span class="muted">&middot; {{.Brand}}</span>{{end}}<br>
+    <span class="meta">{{if .HasPrice}}{{moneyF .Price}}{{end}}{{if .Pack}} &middot; {{.Pack}}{{end}} &middot; {{if .GroupID}}in group {{.GroupID}}{{else}}not linked{{end}} &middot; <a href="{{.URL}}" target="_blank" rel="noopener">on {{.Store}} &nearr;</a></span>
+  </div>
+</div>
+{{end}}
+
+{{define "content"}}
+<h1>Moderation</h1>
+<p class="muted">Guest suggestions waiting for a decision, most-supported first. Accepting applies the change exactly as if you had made it yourself.</p>
+<div class="tabs">
+  <a href="/admin/moderation" {{if eq .Kind ""}}class="active"{{end}}>All</a>
+  <a href="/admin/moderation?kind=link" {{if eq .Kind "link"}}class="active"{{end}}>Link these</a>
+  <a href="/admin/moderation?kind=not_match" {{if eq .Kind "not_match"}}class="active"{{end}}>Not the same</a>
+  <a href="/admin/moderation?kind=unlink" {{if eq .Kind "unlink"}}class="active"{{end}}>Wrong links</a>
+</div>
+{{range .Items}}
+<div class="mod-card">
+  <div><span class="kind-tag {{.Kind}}">{{.KindLabel}}</span>
+    <span class="meta">&middot; {{.Supporters}} {{if eq .Supporters 1}}person{{else}}people{{end}}{{with .Names}} ({{range $i, $n := .}}{{if $i}}, {{end}}{{$n}}{{end}}){{end}} &middot; since {{.FirstAt.Format "2006-01-02 15:04"}}{{if .PriorRejected}} &middot; a supporter has had {{.PriorRejected}} earlier suggestion(s) rejected{{end}}</span></div>
+  <div class="pair">{{template "mside" .Left}}{{template "mside" .Right}}</div>
+  {{with .Notes}}<ul class="notes">{{range .}}<li>{{.}}</li>{{end}}</ul>{{end}}
+  {{with .Error}}<div class="error">{{.}}</div>{{end}}
+  <form method="post" action="/admin/moderation/review" class="actions">
+    <input type="hidden" name="item_kind" value="{{.Kind}}">
+    <input type="hidden" name="left" value="{{.Left.ID}}">
+    <input type="hidden" name="right" value="{{.Right.ID}}">
+    <input type="hidden" name="kind" value="{{$.Kind}}">
+    {{if eq .Kind "unlink"}}
+    <button class="confirm" name="action" value="remove_left">Accept: remove the {{.Left.Store}} listing</button>
+    <button class="confirm" name="action" value="remove_right">Accept: remove the {{.Right.Store}} listing</button>
+    {{else if eq .Kind "link"}}
+    <button class="confirm" name="action" value="accept">Accept: link them</button>
+    {{else}}
+    <button class="confirm" name="action" value="accept">Accept: not the same</button>
+    {{end}}
+    <button class="reject" name="action" value="reject">Reject suggestion</button>
+  </form>
+</div>
+{{else}}
+<p class="empty">Nothing waiting for review.</p>
 {{end}}
 {{end}}
 `))

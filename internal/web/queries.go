@@ -205,6 +205,7 @@ type siblingRow struct {
 	CurrentPrice float64
 	HasSnapshot  bool
 	LastSeen     time.Time
+	Reported     bool // a guest's "this link is wrong" is awaiting moderation
 }
 
 // loadGroupSiblings returns the other products in this product's
@@ -215,7 +216,10 @@ func loadGroupSiblings(ctx context.Context, pool *pgxpool.Pool, id int64) ([]sib
 	rows, err := pool.Query(ctx, `
 		SELECT rp.id, rp.store, rp.sku, rp.name, rp.store = mine.store,
 		       coalesce(pps.current_price, 0), pps.current_price IS NOT NULL,
-		       coalesce(pps.last_observed_at, rp.last_seen)
+		       coalesce(pps.last_observed_at, rp.last_seen),
+		       EXISTS (SELECT 1 FROM contributions c
+		               WHERE c.kind = 'unlink' AND c.status = 'pending'
+		                 AND c.left_product_id = least(rp.id, mine.id) AND c.right_product_id = greatest(rp.id, mine.id))
 		FROM product_group_members me
 		JOIN retail_products mine ON mine.id = me.retail_product_id
 		JOIN product_group_members other ON other.product_group_id = me.product_group_id AND other.retail_product_id <> me.retail_product_id
@@ -231,7 +235,7 @@ func loadGroupSiblings(ctx context.Context, pool *pgxpool.Pool, id int64) ([]sib
 	var out []siblingRow
 	for rows.Next() {
 		var s siblingRow
-		if err := rows.Scan(&s.ID, &s.Store, &s.SKU, &s.Name, &s.SameStore, &s.CurrentPrice, &s.HasSnapshot, &s.LastSeen); err != nil {
+		if err := rows.Scan(&s.ID, &s.Store, &s.SKU, &s.Name, &s.SameStore, &s.CurrentPrice, &s.HasSnapshot, &s.LastSeen, &s.Reported); err != nil {
 			return nil, err
 		}
 		out = append(out, s)
